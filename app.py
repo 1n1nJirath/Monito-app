@@ -137,4 +137,94 @@ def save_metadata():
     with open(META_PATH, 'w') as f:
         json.dump({"last_reset": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")}, f)
 
-def get
+def get_metadata():
+    if os.path.exists(META_PATH):
+        with open(META_PATH, 'r') as f:
+            return json.load(f).get("last_reset", "เพิ่งเปิดระบบครั้งแรก")
+    return "เพิ่งเปิดระบบครั้งแรก"
+
+# --- Data Management & Auto-Fix Error ---
+if 'data' not in st.session_state:
+    if os.path.exists(SAVE_PATH):
+        df = pd.read_csv(SAVE_PATH)
+        if 'Checked' not in df.columns:
+            df['Checked'] = False
+            df.to_csv(SAVE_PATH, index=False)
+        st.session_state.data = df
+    else:
+        pairs = generate_single_cycle_pairs(participants)
+        df = pd.DataFrame([{"Participant": k, "Monito": v, "Checked": False} for k, v in pairs.items()])
+        st.session_state.data = df
+        df.to_csv(SAVE_PATH, index=False)
+        save_metadata()
+
+# --- UI Header & Status ---
+st.write(f"### 🎈 Monito AnurakSciCU 🎁")
+
+last_reset_time = get_metadata()
+checked_count = st.session_state.data['Checked'].sum()
+total_count = len(participants)
+
+st.markdown(f"""
+<div class="status-box">
+    <p style="margin:0; font-size:14px; color:#7f8c8d !important;">📊 สถานะการจับฉลาก</p>
+    <h3 style="margin:5px 0; color:#2c3e50 !important;">สุ่มไปแล้ว: {checked_count} / {total_count} คน</h3>
+    <p style="margin:0; font-size:12px; color:#95a5a6 !important;">🔄 รีเซ็ตล่าสุดเมื่อ: {last_reset_time}</p>
+</div>
+""", unsafe_allow_html=True)
+
+# --- Dropdown Logic ---
+display_options = []
+name_map = {} 
+
+for _, row in st.session_state.data.sort_values(by="Participant").iterrows():
+    name = row['Participant']
+    is_checked = row['Checked']
+    label = f"{name} ✅" if is_checked else name
+    display_options.append(label)
+    name_map[label] = name
+
+selected_label = st.selectbox("👤 เลือกชื่อของคุณ", ["-- กรุณาเลือกชื่อ --"] + display_options)
+
+if selected_label != "-- กรุณาเลือกชื่อ --":
+    actual_name = name_map[selected_label]
+    result_container = st.empty()
+    
+    col1, col2 = st.columns(2)
+    with col1: 
+        show_btn = st.button("👀 ดูผลจับฉลาก", use_container_width=True)
+    with col2: 
+        hide_btn = st.button("🔒 ซ่อนผล", use_container_width=True)
+
+    if show_btn:
+        user_row_idx = st.session_state.data.index[st.session_state.data['Participant'] == actual_name][0]
+        monito_name = st.session_state.data.at[user_row_idx, 'Monito']
+        
+        if not st.session_state.data.at[user_row_idx, 'Checked']:
+            st.session_state.data.at[user_row_idx, 'Checked'] = True
+            st.session_state.data.to_csv(SAVE_PATH, index=False)
+            
+        with result_container.container():
+            st.markdown(f"""
+            <div class="result-box">
+                <h4 style="color: #155724 !important; margin: 0;">🎉 Monito ของคุณคือ: <br><br><b style="font-size: 24px;">{monito_name}</b></h4>
+            </div>
+            """, unsafe_allow_html=True)
+            st.warning("⚠️ จำชื่อนี้ไว้ให้แม่น ห้ามบอกใคร แล้วกดซ่อนผลทันทีครับ")
+
+    if hide_btn: 
+        result_container.empty()
+
+# --- Admin Tools ---
+st.markdown("<br><br><hr>", unsafe_allow_html=True)
+with st.expander("🛠️ Admin Tools (สำหรับผู้ดูแล)"):
+    admin_code = st.text_input("กรุณาใส่รหัสผ่านเพื่อรีเซ็ตระบบ:", type="password")
+    if st.button("⚠️ ล้างข้อมูลและสุ่มคู่ใหม่ทั้งหมด", use_container_width=True):
+        if admin_code == "7886969":
+            if os.path.exists(SAVE_PATH): os.remove(SAVE_PATH)
+            if os.path.exists(META_PATH): os.remove(META_PATH)
+            st.session_state.clear()
+            st.success("รีเซ็ตระบบสำเร็จ! กำลังเริ่มสุ่มใหม่...")
+            st.rerun()
+        else:
+            st.error("รหัสผ่านไม่ถูกต้อง")
