@@ -149,13 +149,13 @@ if 'data' not in st.session_state:
         df = pd.read_csv(SAVE_PATH)
         if 'Checked' not in df.columns:
             df['Checked'] = False
-            df.to_csv(SAVE_PATH, index=False)
+            df.to_csv(SAVE_PATH, index=False, encoding='utf-8-sig')
         st.session_state.data = df
     else:
         pairs = generate_single_cycle_pairs(participants)
         df = pd.DataFrame([{"Participant": k, "Monito": v, "Checked": False} for k, v in pairs.items()])
         st.session_state.data = df
-        df.to_csv(SAVE_PATH, index=False)
+        df.to_csv(SAVE_PATH, index=False, encoding='utf-8-sig')
         save_metadata()
 
 # --- UI Header & Status ---
@@ -202,7 +202,7 @@ if selected_label != "-- กรุณาเลือกชื่อ --":
         
         if not st.session_state.data.at[user_row_idx, 'Checked']:
             st.session_state.data.at[user_row_idx, 'Checked'] = True
-            st.session_state.data.to_csv(SAVE_PATH, index=False)
+            st.session_state.data.to_csv(SAVE_PATH, index=False, encoding='utf-8-sig')
             
         with result_container.container():
             st.markdown(f"""
