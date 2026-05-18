@@ -215,16 +215,33 @@ if selected_label != "-- กรุณาเลือกชื่อ --":
     if hide_btn: 
         result_container.empty()
 
-# --- Admin Tools ---
+# ==========================================
+# ส่วนของ Admin (ใส่รหัส 7886969 เพื่อรีเซ็ต หรือดาวน์โหลดไฟล์)
+# ==========================================
 st.markdown("<br><br><hr>", unsafe_allow_html=True)
 with st.expander("🛠️ Admin Tools (สำหรับผู้ดูแล)"):
     admin_code = st.text_input("กรุณาใส่รหัสผ่านเพื่อรีเซ็ตระบบ:", type="password")
-    if st.button("⚠️ ล้างข้อมูลและสุ่มคู่ใหม่ทั้งหมด", use_container_width=True):
-        if admin_code == "7886969":
+    
+    if admin_code == "7886969":
+        # --- เพิ่มปุ่มดาวน์โหลดไฟล์สำรองตรงนี้ ---
+        if os.path.exists(SAVE_PATH):
+            with open(SAVE_PATH, "rb") as file:
+                st.download_button(
+                    label="📥 ดาวน์โหลดไฟล์สำรอง (Backup Monito)",
+                    data=file,
+                    file_name="monito_backup.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # ปุ่มรีเซ็ตเดิม
+        if st.button("⚠️ ล้างข้อมูลและสุ่มคู่ใหม่ทั้งหมด", use_container_width=True):
             if os.path.exists(SAVE_PATH): os.remove(SAVE_PATH)
             if os.path.exists(META_PATH): os.remove(META_PATH)
             st.session_state.clear()
             st.success("รีเซ็ตระบบสำเร็จ! กำลังเริ่มสุ่มใหม่...")
             st.rerun()
-        else:
-            st.error("รหัสผ่านไม่ถูกต้อง")
+    elif admin_code != "":
+        st.error("รหัสผ่านไม่ถูกต้อง")
