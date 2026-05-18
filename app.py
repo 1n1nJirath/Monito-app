@@ -118,8 +118,8 @@ raw_names = """
 อิงอิง envi #1
 ตะวัน physics #1
 เพทาย geo #บัณฑิต
-อ.มอส
-อ.รุจน์
+อ.มอส botgen
+อ.รุจน์ photo
 """
 participants = sorted([name.strip() for name in raw_names.strip().split('\n') if name.strip()])
 
