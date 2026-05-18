@@ -1,4 +1,3 @@
-
 import streamlit as st
 import random
 import pandas as pd
@@ -12,9 +11,10 @@ META_PATH = "monito_metadata.json"
 
 st.set_page_config(page_title="Monito AnurakSciCU", page_icon="🎁", layout="centered")
 
-# CSS: ปรับ UI ปุ่มให้เต็มบล็อก ไม่ลอย และบังคับสีตัวอักษร
+# CSS: บังคับสีเข้มและตกแต่ง UI แบบ Universal (กัน Dark Mode 100%)
 st.markdown("""
 <style>
+    /* บังคับพื้นหลังและสีตัวอักษรหลัก */
     .stApp { background-color: #f4f7f6 !important; }
     .stApp, h1, h2, h3, h4, p, span, label, div, li { color: #1a1a1a !important; }
     
@@ -28,18 +28,32 @@ st.markdown("""
         box-shadow: 0 4px 6px rgba(0,0,0,0.05);
     }
 
-    /* ตกแต่ง Dropdown */
+    /* 1. ตกแต่ง Dropdown (ตัวกล่องตอนยังไม่กด) */
     div[data-baseweb="select"] > div {
-        background-color: white !important;
+        background-color: #ffffff !important;
         border-radius: 8px !important;
         border: 1px solid #dcdde1 !important;
+        color: #1a1a1a !important;
     }
     
-    /* ปุ่มหลัก - ปรับให้เต็มบล็อก ไม่โค้งมนจนเป็นก้อนลอย */
+    /* 2. แก้ปัญหา Dropdown Pop-up อ่านไม่ออกใน Dark Mode */
+    div[role="listbox"], ul[data-baseweb="menu"] {
+        background-color: #ffffff !important; /* บังคับพื้นหลังรายการเป็นสีขาว */
+    }
+    li[role="option"] {
+        color: #1a1a1a !important; /* บังคับตัวอักษรรายการเป็นสีดำ */
+        background-color: #ffffff !important;
+    }
+    li[role="option"]:hover, li[role="option"][aria-selected="true"] {
+        background-color: #e3f2fd !important; /* สีฟ้าอ่อนตอนเอาเมาส์ชี้หรือเลือกไว้ */
+        color: #0056b3 !important;
+    }
+    
+    /* ปุ่มหลัก */
     div[data-testid="stButton"] > button {
         background-color: #3498db !important;
         color: white !important; 
-        border-radius: 8px !important; /* ปรับจาก 20px เป็น 8px ให้ดูเต็มบล็อก */
+        border-radius: 8px !important;
         font-weight: bold !important;
         width: 100% !important;
         padding: 0.6rem 1rem !important;
@@ -123,96 +137,4 @@ def save_metadata():
     with open(META_PATH, 'w') as f:
         json.dump({"last_reset": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")}, f)
 
-def get_metadata():
-    if os.path.exists(META_PATH):
-        with open(META_PATH, 'r') as f:
-            return json.load(f).get("last_reset", "เพิ่งเปิดระบบครั้งแรก")
-    return "เพิ่งเปิดระบบครั้งแรก"
-
-# --- Data Management & Auto-Fix Error ---
-if 'data' not in st.session_state:
-    if os.path.exists(SAVE_PATH):
-        df = pd.read_csv(SAVE_PATH)
-        if 'Checked' not in df.columns:
-            df['Checked'] = False
-            df.to_csv(SAVE_PATH, index=False)
-        st.session_state.data = df
-    else:
-        pairs = generate_single_cycle_pairs(participants)
-        df = pd.DataFrame([{"Participant": k, "Monito": v, "Checked": False} for k, v in pairs.items()])
-        st.session_state.data = df
-        df.to_csv(SAVE_PATH, index=False)
-        save_metadata()
-
-# --- UI Header & Status ---
-st.write(f"### 🎈 Monito AnurakSciCU 🎁")
-
-last_reset_time = get_metadata()
-checked_count = st.session_state.data['Checked'].sum()
-total_count = len(participants)
-
-st.markdown(f"""
-<div class="status-box">
-    <p style="margin:0; font-size:14px; color:#7f8c8d !important;">📊 สถานะการจับฉลาก</p>
-    <h3 style="margin:5px 0; color:#2c3e50 !important;">สุ่มไปแล้ว: {checked_count} / {total_count} คน</h3>
-    <p style="margin:0; font-size:12px; color:#95a5a6 !important;">🔄 รีเซ็ตล่าสุดเมื่อ: {last_reset_time}</p>
-</div>
-""", unsafe_allow_html=True)
-
-# --- Dropdown Logic ---
-display_options = []
-name_map = {} 
-
-for _, row in st.session_state.data.sort_values(by="Participant").iterrows():
-    name = row['Participant']
-    is_checked = row['Checked']
-    label = f"{name} ✅" if is_checked else name
-    display_options.append(label)
-    name_map[label] = name
-
-selected_label = st.selectbox("👤 เลือกชื่อของคุณ", ["-- กรุณาเลือกชื่อ --"] + display_options)
-
-if selected_label != "-- กรุณาเลือกชื่อ --":
-    actual_name = name_map[selected_label]
-    result_container = st.empty()
-    
-    # วางปุ่ม 2 อันให้เต็มพื้นที่คอลัมน์
-    col1, col2 = st.columns(2)
-    with col1: 
-        show_btn = st.button("👀 ดูผลจับฉลาก", use_container_width=True)
-    with col2: 
-        hide_btn = st.button("🔒 ซ่อนผล", use_container_width=True)
-
-    if show_btn:
-        user_row_idx = st.session_state.data.index[st.session_state.data['Participant'] == actual_name][0]
-        monito_name = st.session_state.data.at[user_row_idx, 'Monito']
-        
-        # บันทึกสถานะว่ากดดูแล้ว โดยไม่ต้องบังคับ Refresh ทันที (แก้บั๊กชื่อเด้ง)
-        if not st.session_state.data.at[user_row_idx, 'Checked']:
-            st.session_state.data.at[user_row_idx, 'Checked'] = True
-            st.session_state.data.to_csv(SAVE_PATH, index=False)
-            
-        with result_container.container():
-            st.markdown(f"""
-            <div class="result-box">
-                <h4 style="color: #155724 !important; margin: 0;">🎉 Monito ของคุณคือ: <br><br><b style="font-size: 24px;">{monito_name}</b></h4>
-            </div>
-            """, unsafe_allow_html=True)
-            st.warning("⚠️ จำชื่อนี้ไว้ให้แม่น ห้ามบอกใคร แล้วกดซ่อนผลทันทีครับ")
-
-    if hide_btn: 
-        result_container.empty()
-
-# --- Admin Tools ---
-st.markdown("<br><br><hr>", unsafe_allow_html=True)
-with st.expander("🛠️ Admin Tools (สำหรับผู้ดูแล)"):
-    admin_code = st.text_input("กรุณาใส่รหัสผ่านเพื่อรีเซ็ตระบบ:", type="password")
-    if st.button("⚠️ ล้างข้อมูลและสุ่มคู่ใหม่ทั้งหมด", use_container_width=True):
-        if admin_code == "7886969":
-            if os.path.exists(SAVE_PATH): os.remove(SAVE_PATH)
-            if os.path.exists(META_PATH): os.remove(META_PATH)
-            st.session_state.clear()
-            st.success("รีเซ็ตระบบสำเร็จ! กำลังเริ่มสุ่มใหม่...")
-            st.rerun()
-        else:
-            st.error("รหัสผ่านไม่ถูกต้อง")
+def get
