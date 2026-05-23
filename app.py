@@ -134,8 +134,11 @@ def generate_single_cycle_pairs(names):
     return pairs
 
 def save_metadata():
+    # บังคับ Timezone ให้เป็นเวลาประเทศไทย (UTC+7)
+    thai_tz = datetime.timezone(datetime.timedelta(hours=7))
+    thai_time = datetime.datetime.now(thai_tz).strftime("%d/%m/%Y %H:%M:%S")
     with open(META_PATH, 'w') as f:
-        json.dump({"last_reset": datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")}, f)
+        json.dump({"last_reset": thai_time}, f)
 
 def get_metadata():
     if os.path.exists(META_PATH):
