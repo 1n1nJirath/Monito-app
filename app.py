@@ -4,6 +4,7 @@ import io
 import random
 import re
 import time
+from copy import copy
 
 import pandas as pd
 import streamlit as st
@@ -466,19 +467,87 @@ def display_label(row) -> str:
     return f"{row['Name']} ({row['Dept']} #{row['Year']})"
 
 
+def order_results_by_cycle(result_df: pd.DataFrame) -> pd.DataFrame:
+    """Order rows by following each person's Monito link around each closed circle."""
+    ordered_source = result_df[RESULT_COLUMNS].copy()
+    if ordered_source.empty:
+        ordered_source.insert(0, "วง", pd.Series(dtype="int64"))
+        ordered_source.insert(1, "ลำดับในวง", pd.Series(dtype="int64"))
+        return ordered_source
+
+    names = ordered_source["Name"].tolist()
+    next_person = dict(zip(ordered_source["Name"], ordered_source["Monito"]))
+
+    # A valid circle assignment must be a permutation: every participant appears
+    # exactly once as a giver and exactly once as a recipient.
+    if len(next_person) != len(names) or set(next_person.values()) != set(names):
+        raise ValueError("ผลจับฉลากไม่ใช่วงปิดที่สมบูรณ์ จึงไม่สามารถเรียงลำดับ Excel ตามวงได้")
+
+    visited = set()
+    ordered_names = []
+    circle_by_name = {}
+    position_by_name = {}
+    circle_number = 0
+
+    # Start each new circle from the first not-yet-visited name in the sheet,
+    # then follow Monito -> next row until the circle returns to its start.
+    for start in names:
+        if start in visited:
+            continue
+        circle_number += 1
+        current = start
+        circle_names = []
+
+        while current not in circle_names:
+            if current in visited:
+                raise ValueError("พบวงจับฉลากเชื่อมกันผิดรูปแบบ จึงไม่สามารถเรียง Excel ได้")
+            circle_names.append(current)
+            current = next_person[current]
+
+        if current != start:
+            raise ValueError("วงจับฉลากไม่ย้อนกลับมายังจุดเริ่มต้น จึงไม่สามารถเรียง Excel ได้")
+
+        for position, name in enumerate(circle_names, start=1):
+            visited.add(name)
+            ordered_names.append(name)
+            circle_by_name[name] = circle_number
+            position_by_name[name] = position
+
+    indexed = ordered_source.set_index("Name", drop=False)
+    export_df = indexed.loc[ordered_names].reset_index(drop=True)
+    export_df.insert(0, "วง", export_df["Name"].map(circle_by_name))
+    export_df.insert(1, "ลำดับในวง", export_df["Name"].map(position_by_name))
+    return export_df
+
+
 def create_offline_excel(result_df: pd.DataFrame) -> bytes:
-    """Export results with the recipient's department/year label, without DOB."""
+    """Export an easy-to-follow circle order, without DOB."""
     buffer = io.BytesIO()
-    export_df = result_df[RESULT_COLUMNS].copy()
-    # Keep the database value in Google Sheets as the exact Name for validation,
-    # but make the offline staff file easier to read by adding Dept and Year.
+    export_df = order_results_by_cycle(result_df)
+
+    # Keep exact names in the database, but include the target's Dept/Year in
+    # the offline file so staff can follow each giver -> recipient -> next giver.
     person_labels = {
         row["Name"]: display_label(row)
         for _, row in df_master.iterrows()
     }
     export_df["Monito"] = export_df["Monito"].map(person_labels).fillna(export_df["Monito"])
+
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="ผลจับฉลาก")
+        worksheet = writer.sheets["ผลจับฉลาก"]
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+        worksheet.column_dimensions["A"].width = 9   # วง
+        worksheet.column_dimensions["B"].width = 12  # ลำดับในวง
+        worksheet.column_dimensions["C"].width = 24  # Name
+        worksheet.column_dimensions["D"].width = 22  # Dept
+        worksheet.column_dimensions["E"].width = 12  # Year
+        worksheet.column_dimensions["F"].width = 40  # Monito (incl. dept/year)
+        for cell in worksheet[1]:
+            header_font = copy(cell.font)
+            header_font.bold = True
+            cell.font = header_font
     return buffer.getvalue()
 
 
@@ -607,6 +676,7 @@ if result_exists:
                         "🔑 2. รหัสผ่าน (วันเกิด DDMMYYYY)",
                         type="password",
                         placeholder="เช่น 05052003",
+                        key="participant_dob_input",
                     )
                     submitted = st.form_submit_button("👀 ดูผลจับฉลาก")
 
@@ -628,7 +698,22 @@ if result_exists:
                 monito_name = result_lookup[selected_name]["Monito"]
                 # Show the recipient's name, department, and year in the UI.
                 st.subheader(name_to_label.get(monito_name, monito_name))
-                st.caption("ผลจะแสดงในเซสชันนี้ชั่วคราว โปรดจำชื่อไว้และหลีกเลี่ยงการแชร์หน้าจอให้ผู้อื่น")
+                st.caption("เมื่อจำผลได้แล้ว กดซ่อนผลก่อนส่งเครื่องให้คนถัดไป")
+
+                def hide_participant_result():
+                    """Clear this browser session's result before the next person uses it."""
+                    st.session_state.pop("verified_participant_name", None)
+                    st.session_state.pop("verified_participant_until", None)
+                    st.session_state["participant_name_select"] = ""
+                    st.session_state["last_selected_participant"] = ""
+                    st.session_state["participant_dob_input"] = ""
+
+                st.button(
+                    "🙈 ซ่อนผลและให้คนถัดไปใช้เครื่องนี้",
+                    key="hide_participant_result_button",
+                    on_click=hide_participant_result,
+                    use_container_width=True,
+                )
 
     # -----------------------------------------------------
     # Admin tools when results exist
@@ -662,9 +747,9 @@ if result_exists:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_offline_results",
                 )
-                st.caption("ไฟล์นี้ไม่มี DOB มีเฉพาะ Name, Dept, Year และ Monito")
+                st.caption("ไฟล์นี้เรียงผลต่อเนื่องตามแต่ละวง มีเลขวง/ลำดับในวง และไม่มี DOB")
             except Exception:
-                st.warning("สร้างไฟล์ Excel ไม่สำเร็จ ตรวจสอบว่าได้ติดตั้ง openpyxl แล้ว")
+                st.warning("สร้างไฟล์ Excel ไม่สำเร็จ กรุณาตรวจสอบข้อมูลผลจับฉลากและการติดตั้ง openpyxl")
 
         st.warning("ล้างผลเฉพาะแท็บ 'ผลจับฉลาก' เท่านั้น แท็บรายชื่อและการตั้งค่ารหัส Admin จะไม่ถูกลบ")
         confirm_reset = st.checkbox("ฉันสำรองผลจับฉลากแล้วและยืนยันให้ล้างผล", key="confirm_reset_results")
