@@ -52,7 +52,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("🎈 Monito AnurakSciCU 🎁")
+st.title("🌲 Monito AnurakSciCU 🦉")
 st.caption("ระบบจับฉลากบัดดี้ออนไลน์")
 
 # ---------------------------------------------------------
@@ -81,26 +81,69 @@ BOOTSTRAP_ADMIN_PASSWORD = str(st.secrets.get("ADMIN_BOOTSTRAP_PASSWORD", ""))
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
     # ttl=0 ลดโอกาสแสดงผลเก่าหลังสุ่มหรือรีเซ็ต
+    read_stage = f"อ่านแท็บ {MASTER_SHEET}"
     df_raw = conn.read(
         spreadsheet=SPREADSHEET_URL,
         worksheet=MASTER_SHEET,
         ttl=0,
     )
-    df_result_raw = conn.read(
-        spreadsheet=SPREADSHEET_URL,
-        worksheet=RESULT_SHEET,
-        ttl=0,
-    )
-    df_config = conn.read(
-        spreadsheet=SPREADSHEET_URL,
-        worksheet=CONFIG_SHEET,
-        ttl=0,
-    )
-except Exception:
+
+    # การล้างผลรุ่นเก่าอาจทำให้หัวตารางในแท็บผลจับฉลากหายไปทั้งหมด
+    # หากชีตว่าง ให้สร้างเฉพาะหัวคอลัมน์มาตรฐานกลับคืน ไม่แตะรายชื่อหรือ config
+    read_stage = f"อ่านแท็บ {RESULT_SHEET}"
+    try:
+        df_result_raw = conn.read(
+            spreadsheet=SPREADSHEET_URL,
+            worksheet=RESULT_SHEET,
+            ttl=0,
+        )
+    except pd.errors.EmptyDataError:
+        df_result_raw = pd.DataFrame()
+
+    if df_result_raw.empty and not set(RESULT_COLUMNS).issubset(df_result_raw.columns):
+        conn.update(
+            spreadsheet=SPREADSHEET_URL,
+            worksheet=RESULT_SHEET,
+            data=pd.DataFrame(columns=RESULT_COLUMNS),
+        )
+        st.cache_data.clear()
+        df_result_raw = conn.read(
+            spreadsheet=SPREADSHEET_URL,
+            worksheet=RESULT_SHEET,
+            ttl=0,
+        )
+
+    read_stage = f"อ่านแท็บ {CONFIG_SHEET}"
+    try:
+        df_config = conn.read(
+            spreadsheet=SPREADSHEET_URL,
+            worksheet=CONFIG_SHEET,
+            ttl=0,
+        )
+    except pd.errors.EmptyDataError:
+        df_config = pd.DataFrame()
+
+    # แท็บตั้งค่าที่ว่างสนิทอาจเกิดจากขั้นตอนกู้รหัสที่ลบข้อมูลแถวเดิม
+    # กู้คืนเฉพาะหัวคอลัมน์ Key/Value เพื่อให้ระบบตั้งรหัสใหม่ได้
+    if df_config.empty and not {"Key", "Value"}.issubset(df_config.columns):
+        conn.update(
+            spreadsheet=SPREADSHEET_URL,
+            worksheet=CONFIG_SHEET,
+            data=pd.DataFrame(columns=["Key", "Value"]),
+        )
+        st.cache_data.clear()
+        df_config = conn.read(
+            spreadsheet=SPREADSHEET_URL,
+            worksheet=CONFIG_SHEET,
+            ttl=0,
+        )
+except Exception as e:
+    # รายละเอียดไปที่ Logs สำหรับผู้พัฒนาเท่านั้น ไม่แสดง exception/ข้อมูลเชื่อมต่อบนหน้าเว็บสาธารณะ
+    print(f"[MONITO GOOGLE SHEETS ERROR] stage={locals().get('read_stage', 'initialize connection')}; type={type(e).__name__}; detail={e}")
     st.error(
         "ไม่สามารถอ่าน Google Sheets ได้ กรุณาตรวจสอบ URL, ชื่อแท็บ, "
         "สิทธิ์ Editor ของ Service Account และการตั้งค่า Streamlit Secrets "
-        "รวมถึงการสร้างแท็บ 'ตั้งค่า' แล้ว"
+        "รวมถึงการสร้างแท็บ 'ตั้งค่า' แล้ว หากเพิ่งกดรีเซ็ต ให้ตรวจว่าแท็บผลจับฉลากยังมีหัวคอลัมน์อยู่"
     )
     st.stop()
 
@@ -755,12 +798,20 @@ if result_exists:
         confirm_reset = st.checkbox("ฉันสำรองผลจับฉลากแล้วและยืนยันให้ล้างผล", key="confirm_reset_results")
         if st.button("⚠️ ล้างผลจับฉลากเพื่อเริ่มค่ายใหม่", disabled=not confirm_reset, key="reset_results_button"):
             try:
-                conn.clear(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET)
+                # update() จะล้างค่าเดิมแล้วเขียนหัวคอลัมน์กลับให้เสมอ
+                # อย่าใช้ conn.clear() เพียงอย่างเดียว เพราะจะลบหัวตาราง A1:D1 ด้วย
+                conn.update(
+                    spreadsheet=SPREADSHEET_URL,
+                    worksheet=RESULT_SHEET,
+                    data=pd.DataFrame(columns=RESULT_COLUMNS),
+                )
+                st.cache_data.clear()
                 st.session_state.pop("verified_participant_name", None)
                 st.session_state.pop("verified_participant_until", None)
-                st.success("ล้างผลจับฉลากแล้ว")
+                st.success("ล้างผลจับฉลากแล้ว และคงหัวตารางไว้พร้อมสำหรับค่ายถัดไป")
                 st.rerun()
-            except Exception:
+            except Exception as e:
+                print(f"[MONITO RESET ERROR] type={type(e).__name__}; detail={e}")
                 st.error("ล้างผลจับฉลากไม่สำเร็จ กรุณาตรวจสอบสิทธิ์ Service Account")
 
 # ---------------------------------------------------------
