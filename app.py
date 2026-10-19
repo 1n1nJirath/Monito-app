@@ -467,8 +467,16 @@ def display_label(row) -> str:
 
 
 def create_offline_excel(result_df: pd.DataFrame) -> bytes:
+    """Export results with the recipient's department/year label, without DOB."""
     buffer = io.BytesIO()
     export_df = result_df[RESULT_COLUMNS].copy()
+    # Keep the database value in Google Sheets as the exact Name for validation,
+    # but make the offline staff file easier to read by adding Dept and Year.
+    person_labels = {
+        row["Name"]: display_label(row)
+        for _, row in df_master.iterrows()
+    }
+    export_df["Monito"] = export_df["Monito"].map(person_labels).fillna(export_df["Monito"])
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         export_df.to_excel(writer, index=False, sheet_name="ผลจับฉลาก")
     return buffer.getvalue()
@@ -617,7 +625,9 @@ if result_exists:
             verified_until = float(st.session_state.get("verified_participant_until", 0))
             if verified_name == selected_name and time.time() <= verified_until:
                 st.success("🎉 Monito ของคุณคือ:")
-                st.subheader(result_lookup[selected_name]["Monito"])
+                monito_name = result_lookup[selected_name]["Monito"]
+                # Show the recipient's name, department, and year in the UI.
+                st.subheader(name_to_label.get(monito_name, monito_name))
                 st.caption("ผลจะแสดงในเซสชันนี้ชั่วคราว โปรดจำชื่อไว้และหลีกเลี่ยงการแชร์หน้าจอให้ผู้อื่น")
 
     # -----------------------------------------------------
@@ -635,10 +645,12 @@ if result_exists:
                         df_result["Name"].str.casefold().str.contains(
                             search_name.strip().casefold(), regex=False
                         )
-                    ][RESULT_COLUMNS]
+                    ][RESULT_COLUMNS].copy()
                     if found.empty:
                         st.info("ไม่พบชื่อที่ค้นหา")
                     else:
+                        # For Admin's display, show the recipient's Dept and Year too.
+                        found["Monito"] = found["Monito"].map(name_to_label).fillna(found["Monito"])
                         st.dataframe(found, use_container_width=True, hide_index=True)
 
             try:
