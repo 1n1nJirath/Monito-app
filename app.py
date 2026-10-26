@@ -85,7 +85,7 @@ try:
     df_raw = conn.read(
         spreadsheet=SPREADSHEET_URL,
         worksheet=MASTER_SHEET,
-        ttl=0,
+        ttl=30,
     )
 
     # การล้างผลรุ่นเก่าอาจทำให้หัวตารางในแท็บผลจับฉลากหายไปทั้งหมด
@@ -95,7 +95,7 @@ try:
         df_result_raw = conn.read(
             spreadsheet=SPREADSHEET_URL,
             worksheet=RESULT_SHEET,
-            ttl=0,
+            ttl=30,
         )
     except pd.errors.EmptyDataError:
         df_result_raw = pd.DataFrame()
@@ -118,7 +118,7 @@ try:
         df_config = conn.read(
             spreadsheet=SPREADSHEET_URL,
             worksheet=CONFIG_SHEET,
-            ttl=0,
+            ttl=30,
         )
     except pd.errors.EmptyDataError:
         df_config = pd.DataFrame()
