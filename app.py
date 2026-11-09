@@ -476,4 +476,82 @@ if result_exists:
                             try:
                                 sh.worksheet(backup_sheet_name) # ลองดูว่ามีแท็บนี้หรือยัง
                             except:
-                                sh.add_worksheet(title=backup_sheet_name
+                                sh.add_worksheet(title=backup_sheet_name, rows=max(100, len(df_result_raw)+20), cols=10) # สร้างแท็บใหม่
+                            
+                            conn.update(spreadsheet=SPREADSHEET_URL, worksheet=backup_sheet_name, data=df_result_raw)
+                            write_log(f"Backup saved to sheet: {backup_sheet_name}")
+                        except Exception as e:
+                            print(f"Backup Warning: {e}")
+                            st.warning("⚠️ แอบมีปัญหาตอนสร้างแท็บ Backup แต่อยู่ระหว่างดำเนินการเคลียร์ชีทหลัก...")
+
+                        # ล้างข้อมูลในแท็บหลัก
+                        conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=pd.DataFrame([{col: "" for col in RESULT_COLUMNS}]))
+                        st.cache_data.clear(); st.session_state.pop("verified_participant_name", None)
+                        write_log("Results cleared.")
+                        st.success(f"ล้างผลสำเร็จ (สร้างข้อมูล Backup ไว้ที่แท็บ {backup_sheet_name})")
+                        time.sleep(2)
+                        st.rerun()
+                    except Exception: st.error("ล้างผลไม่สำเร็จ")
+                    finally: set_drawing_lock(False)
+
+else:
+    st.info("โหมดเตรียมการสำหรับสตาฟ")
+    if master_error: st.error(master_error)
+    elif df_master.empty: st.error("ไม่พบรายชื่อในแท็บ 'รายชื่อ'")
+    else:
+        st.write(f"พบรายชื่อผู้เข้าร่วม {len(df_master)} คน")
+        if not admin_is_authenticated(): st.warning("ต้องเข้าสู่ระบบ Admin ก่อน จึงจะจัดวงและสุ่มได้")
+        elif len(df_master) < 3: st.error("ต้องมีอย่างน้อย 3 คน")
+        else:
+            participant_names = df_master["Name"].tolist()
+            if "locked_pairs" not in st.session_state: st.session_state.locked_pairs = []
+            if "blocked_pairs" not in st.session_state: st.session_state.blocked_pairs = []
+
+            st.markdown("### 🔒 ล็อกคู่ (ต้องได้)")
+            if st.session_state.locked_pairs:
+                for i, lock in enumerate(st.session_state.locked_pairs):
+                    c1, c2, c3 = st.columns([4, 4, 2])
+                    c1.markdown(f"**{lock['giver']}** ➡️ จับได้")
+                    c2.markdown(f"**{lock['target']}**")
+                    if c3.button("ลบ", key=f"del_lock_{i}"): st.session_state.locked_pairs.pop(i); st.rerun()
+            with st.expander("➕ เพิ่มล็อกคู่"):
+                col1, col2 = st.columns(2)
+                avail_g = [n for n in participant_names if n not in [l['giver'] for l in st.session_state.locked_pairs]]
+                avail_t = [n for n in participant_names if n not in [l['target'] for l in st.session_state.locked_pairs]]
+                with col1: giver = st.selectbox("ผู้จับ", [""] + avail_g, key="lock_g")
+                with col2: target = st.selectbox("จับได้ใคร", [""] + avail_t, key="lock_t")
+                if st.button("บันทึกล็อกคู่", use_container_width=True):
+                    if not giver or not target: st.error("เลือกให้ครบ")
+                    elif giver == target: st.error("ห้ามจับตัวเอง")
+                    else: st.session_state.locked_pairs.append({"giver": giver, "target": target}); st.rerun()
+
+            st.markdown("### 🚫 ห้ามคู่ (ห้ามได้)")
+            if st.session_state.blocked_pairs:
+                for i, block in enumerate(st.session_state.blocked_pairs):
+                    c1, c2, c3 = st.columns([4, 4, 2])
+                    c1.markdown(f"**{block['giver']}** ❌ ห้ามได้")
+                    c2.markdown(f"**{block['target']}**")
+                    if c3.button("ลบ", key=f"del_block_{i}"): st.session_state.blocked_pairs.pop(i); st.rerun()
+            with st.expander("➖ เพิ่มห้ามคู่"):
+                col1, col2 = st.columns(2)
+                with col1: b_giver = st.selectbox("ผู้จับ", [""] + participant_names, key="block_g")
+                with col2: b_target = st.selectbox("ห้ามจับได้ใคร", [""] + participant_names, key="block_t")
+                if st.button("บันทึกห้ามคู่", use_container_width=True):
+                    if not b_giver or not b_target: st.error("เลือกให้ครบ")
+                    elif b_giver == b_target: st.error("ระบบห้ามจับตัวเองอยู่แล้ว")
+                    elif any(b["giver"]==b_giver and b["target"]==b_target for b in st.session_state.blocked_pairs): st.error("มีกฎนี้อยู่แล้ว")
+                    else: st.session_state.blocked_pairs.append({"giver": b_giver, "target": b_target}); st.rerun()
+
+            st.markdown("---")
+            num_circles = st.slider("🔄 ต้องการแบ่งเป็นกี่วง?", 1, max(1, len(df_master) // 3), 1)
+            
+            if st.button("🎲 เริ่มสุ่มจับคู่และล็อกผล", use_container_width=True):
+                if is_drawing_in_progress():
+                    st.error("❌ มีสตาฟท่านอื่นกำลังประมวลผลอยู่ กรุณารอสักครู่")
+                else:
+                    try:
+                        set_drawing_lock(True)
+                        with st.spinner("กำลังประมวลผล..."):
+                            run_draw(num_circles, st.session_state.locked_pairs, st.session_state.blocked_pairs)
+                    finally:
+                        set_drawing_lock(False)
