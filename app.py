@@ -5,23 +5,21 @@ import random
 import re
 import time
 from copy import copy
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 
 # =========================================================
-# Monito AnurakSciCU
-# - เพิ่มระบบล็อกผล (Fixed Matches) จับคู่ล่วงหน้า
-# - เพิ่มระบบห้ามจับคู่ (Blocked Matches) ห้ามจับคนนี้
-# - ป้องกัน Rate Limit จาก Google Sheets (ttl=30)
+# Monito AnurakSciCU (Ultimate Version)
+# - เพิ่ม Concurrency Control (กันกดสุ่มพร้อมกัน)
+# - เพิ่ม Auto-Backup เมื่อกดล้างผล
+# - เพิ่ม Audit Logs ในแท็บตั้งค่า
+# - เวลาในระบบตรงกับเวลาประเทศไทย (UTC+7)
 # =========================================================
 
-st.set_page_config(
-    page_title="Monito AnurakSciCU",
-    page_icon="🎁",
-    layout="centered",
-)
+st.set_page_config(page_title="Monito AnurakSciCU", page_icon="🎁", layout="centered")
 
 st.markdown(
     """
@@ -34,7 +32,6 @@ st.markdown(
             border-radius: 8px; font-weight: 600; width: 100%;
         }
         .status-box { background: #ffffff; padding: 18px; border-radius: 10px; border: 1px solid #dcdde1; margin-bottom: 20px; }
-        .lock-box { background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #90caf9;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -44,7 +41,7 @@ st.title("🌲 Monito AnurakSciCU 🦉")
 st.caption("ระบบจับฉลากบัดดี้ออนไลน์")
 
 # ---------------------------------------------------------
-# Settings
+# Settings & Timezone
 # ---------------------------------------------------------
 MASTER_SHEET = "รายชื่อ"
 RESULT_SHEET = "ผลจับฉลาก"
@@ -55,6 +52,11 @@ PBKDF2_ITERATIONS = 600_000
 ADMIN_SESSION_SECONDS = 30 * 60
 MAX_DOB_ATTEMPTS_PER_SESSION = 5
 
+BKK_TZ = timezone(timedelta(hours=7))
+
+def get_bkk_time():
+    return datetime.now(BKK_TZ)
+
 try:
     SPREADSHEET_URL = str(st.secrets["app"]["spreadsheet_url"]).strip()
 except Exception:
@@ -63,9 +65,13 @@ except Exception:
 
 BOOTSTRAP_ADMIN_PASSWORD = str(st.secrets.get("ADMIN_BOOTSTRAP_PASSWORD", ""))
 
+# ---------------------------------------------------------
+# Connection & Initialize
+# ---------------------------------------------------------
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
     df_raw = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=MASTER_SHEET, ttl=30)
+    
     try: df_result_raw = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, ttl=30)
     except pd.errors.EmptyDataError: df_result_raw = pd.DataFrame()
 
@@ -86,7 +92,52 @@ except Exception:
     st.stop()
 
 # ---------------------------------------------------------
-# Data validation
+# Audit Logs System
+# ---------------------------------------------------------
+def write_log(message: str):
+    """Write an audit log to the config sheet (keeps last 15 logs)"""
+    try:
+        current_config = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=0)
+        logs = [r for _, r in current_config.iterrows() if str(r.get("Key", "")).startswith("log_")]
+        logs = sorted(logs, key=lambda x: x["Key"], reverse=True)[:14] # Keep last 14 logs to make room for new one
+        
+        timestamp_str = get_bkk_time().strftime("%Y%m%d_%H%M%S")
+        new_log = {"Key": f"log_{timestamp_str}", "Value": f"[{get_bkk_time().strftime('%d/%m/%Y %H:%M:%S')}] {message}"}
+        
+        non_logs = [r for _, r in current_config.iterrows() if not str(r.get("Key", "")).startswith("log_")]
+        updated_config = pd.DataFrame(non_logs + [new_log] + logs)
+        
+        conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=updated_config)
+    except Exception as e:
+        print(f"Log Error: {e}")
+
+# ---------------------------------------------------------
+# Concurrency Lock (Drawing Status)
+# ---------------------------------------------------------
+def is_drawing_in_progress() -> bool:
+    values = config_values(df_config)
+    lock_time_str = values.get("system_drawing_lock", "0")
+    try:
+        lock_time = float(lock_time_str)
+        # Lock expires after 2 minutes just in case process crashes
+        if get_bkk_time().timestamp() - lock_time < 120:
+            return True
+    except: pass
+    return False
+
+def set_drawing_lock(status: bool):
+    current_config = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=0)
+    current_config = current_config[current_config["Key"] != "system_drawing_lock"]
+    if status:
+        lock_data = pd.DataFrame([{"Key": "system_drawing_lock", "Value": str(get_bkk_time().timestamp())}])
+        updated_config = pd.concat([current_config, lock_data], ignore_index=True)
+    else:
+        updated_config = current_config
+    conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=updated_config)
+    st.cache_data.clear()
+
+# ---------------------------------------------------------
+# Validation Helpers
 # ---------------------------------------------------------
 def clean_cell(value) -> str:
     try:
@@ -135,13 +186,13 @@ def validate_result_data(result_df: pd.DataFrame, master_df: pd.DataFrame):
         if result_by_name.get(target, {}).get("Monito") == giver: return False, "จับสลับกันเอง"
     return True, ""
 
-# ---------------------------------------------------------
-# Admin Setup
-# ---------------------------------------------------------
 def config_values(config_df: pd.DataFrame) -> dict:
     if config_df is None or config_df.empty: return {}
     return {clean_cell(r["Key"]): clean_cell(r["Value"]) for _, r in config_df.iterrows() if clean_cell(r.get("Key"))}
 
+# ---------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------
 def stored_admin_credentials(config_df: pd.DataFrame) -> dict:
     values = config_values(config_df)
     if not values.get("admin_salt") or not values.get("admin_hash"): return {}
@@ -156,20 +207,24 @@ def verify_admin_password(password: str, credentials: dict) -> bool:
 
 def save_admin_password(password: str):
     salt = __import__("secrets").token_hex(24)
-    conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=pd.DataFrame([
+    current_config = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=0)
+    current_config = current_config[~current_config["Key"].isin(["admin_salt", "admin_hash", "admin_iterations", "admin_initialized"])]
+    new_creds = pd.DataFrame([
         {"Key": "admin_salt", "Value": salt},
         {"Key": "admin_hash", "Value": password_digest(password, salt, PBKDF2_ITERATIONS)},
         {"Key": "admin_iterations", "Value": str(PBKDF2_ITERATIONS)},
         {"Key": "admin_initialized", "Value": "1"},
-    ]))
+    ])
+    conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=pd.concat([current_config, new_creds], ignore_index=True))
     st.cache_data.clear()
+    write_log("Admin password was changed/initialized.")
 
 def admin_is_authenticated() -> bool:
     if not st.session_state.get("admin_authenticated", False): return False
-    if time.time() > float(st.session_state.get("admin_expires_at", 0)):
+    if get_bkk_time().timestamp() > float(st.session_state.get("admin_expires_at", 0)):
         st.session_state["admin_authenticated"] = False
         return False
-    st.session_state["admin_expires_at"] = time.time() + ADMIN_SESSION_SECONDS
+    st.session_state["admin_expires_at"] = get_bkk_time().timestamp() + ADMIN_SESSION_SECONDS
     return True
 
 def render_admin_login(config_df: pd.DataFrame):
@@ -184,7 +239,8 @@ def render_admin_login(config_df: pd.DataFrame):
             if st.button("เข้าสู่ระบบผู้ดูแล"):
                 valid = verify_admin_password(pwd, credentials) if credentials else (bool(BOOTSTRAP_ADMIN_PASSWORD) and hmac.compare_digest(pwd, BOOTSTRAP_ADMIN_PASSWORD) if not already_initialized else False)
                 if valid:
-                    st.session_state.update({"admin_authenticated": True, "admin_expires_at": time.time() + ADMIN_SESSION_SECONDS})
+                    st.session_state.update({"admin_authenticated": True, "admin_expires_at": get_bkk_time().timestamp() + ADMIN_SESSION_SECONDS})
+                    write_log("Admin logged in successfully.")
                     st.rerun()
                 else: st.error("รหัสไม่ถูกต้อง")
         else:
@@ -216,7 +272,7 @@ def _render_password_change_form(title: str, form_key: str):
                 except Exception: st.error("บันทึกไม่สำเร็จ")
 
 # ---------------------------------------------------------
-# Algorithm Generator with Lock & Block Pairs
+# Algorithm Generator
 # ---------------------------------------------------------
 def run_draw(num_circles: int, locked_pairs_list: list, blocked_pairs_list: list):
     names = df_master["Name"].tolist()
@@ -227,21 +283,13 @@ def run_draw(num_circles: int, locked_pairs_list: list, blocked_pairs_list: list
     locked_pairs = {p["giver"]: p["target"] for p in locked_pairs_list}
     blocked_edges = set((p["giver"], p["target"]) for p in blocked_pairs_list)
 
-    # 1. Validation Locks & Blocks
     targets = set()
     for g, t in locked_pairs.items():
-        if g not in names or t not in names:
-            st.error(f"รายชื่อล็อก ({g} หรือ {t}) ไม่อยู่ในฐานข้อมูล")
-            return
-        if t in targets:
-            st.error(f"มีการล็อกให้เป้าหมาย '{t}' ซ้ำกันมากกว่า 1 คน")
-            return
-        if (g, t) in blocked_edges:
-            st.error(f"ข้อขัดแย้ง: {g} ถูกล็อกให้จับ {t} แต่มีกฎห้ามจับคู่นี้อยู่")
-            return
+        if g not in names or t not in names: return st.error(f"รายชื่อล็อก ({g} หรือ {t}) ไม่อยู่ในฐานข้อมูล")
+        if t in targets: return st.error(f"มีการล็อกให้เป้าหมาย '{t}' ซ้ำกันมากกว่า 1 คน")
+        if (g, t) in blocked_edges: return st.error(f"ข้อขัดแย้ง: {g} ถูกล็อกให้จับ {t} แต่มีกฎห้ามจับคู่นี้อยู่")
         targets.add(t)
 
-    # 2. Build Super Nodes (Paths)
     next_node = locked_pairs.copy()
     in_degree = {n: 0 for n in names}
     for g, t in next_node.items(): in_degree[t] += 1
@@ -251,38 +299,23 @@ def run_draw(num_circles: int, locked_pairs_list: list, blocked_pairs_list: list
         if in_degree[n] == 0:
             path, curr = [], n
             while curr is not None:
-                path.append(curr)
-                visited.add(curr)
-                curr = next_node.get(curr)
+                path.append(curr); visited.add(curr); curr = next_node.get(curr)
             paths.append(path)
-
     for n in names:
         if n not in visited:
             path, curr = [], n
             while curr not in visited:
-                path.append(curr)
-                visited.add(curr)
-                curr = next_node.get(curr)
+                path.append(curr); visited.add(curr); curr = next_node.get(curr)
             forced_cycles.append(path)
 
-    # 3. Check Circle Constraints
-    if len(forced_cycles) > num_circles:
-        st.error(f"การล็อกทำให้เกิดวงปิดแล้ว ({len(forced_cycles)} วง) ขัดแย้งกับการสุ่มที่ตั้งไว้ ({num_circles} วง) กรุณาเพิ่มจำนวนวง")
-        return
-    if forced_cycles and num_circles == 1 and len(forced_cycles[0]) < len(names):
-        st.error("การล็อกทำให้เกิดวงย่อย ขัดแย้งกับการสุ่ม 1 วงใหญ่ กรุณาเพิ่มจำนวนวง หรือลบการล็อก")
-        return
+    if len(forced_cycles) > num_circles: return st.error(f"การล็อกเกิดวงปิดแล้ว ({len(forced_cycles)} วง) เกินวงที่ตั้งไว้ กรุณาเพิ่มวง")
+    if forced_cycles and num_circles == 1 and len(forced_cycles[0]) < len(names): return st.error("วงย่อยขัดแย้งกับสุ่ม 1 วงใหญ่ กรุณาเพิ่มวง หรือลบการล็อก")
 
     remaining_circles = num_circles - len(forced_cycles)
-    if paths and remaining_circles <= 0:
-        st.error("จำนวนวงเต็มแล้ว ไม่สามารถจัดคนที่เหลือลงวงได้ กรุณาเพิ่มจำนวนวง")
-        return
+    if paths and remaining_circles <= 0: return st.error("วงเต็มแล้ว กรุณาเพิ่มวง")
 
-    # 4. Generate & Test Loop (Max 2000 attempts)
     valid_final_pairs = None
-    max_retries = 2000
-    
-    for attempt in range(max_retries):
+    for _ in range(2000):
         random.SystemRandom().shuffle(paths)
         groups = [[] for _ in range(remaining_circles)]
         for idx, p in enumerate(paths): groups[idx % remaining_circles].append(p)
@@ -291,52 +324,36 @@ def run_draw(num_circles: int, locked_pairs_list: list, blocked_pairs_list: list
         for c in forced_cycles:
             for i in range(len(c)): final_pairs[c[i]] = c[(i+1)%len(c)]
 
-        is_invalid_attempt = False
+        is_invalid = False
         for g in groups:
             if not g: continue
-            if sum(len(p) for p in g) < 3:
-                is_invalid_attempt = True
-                break
-            
+            if sum(len(p) for p in g) < 3: is_invalid = True; break
             for i in range(len(g)):
-                current_path = g[i]
-                next_path = g[(i+1)%len(g)]
-                for j in range(len(current_path)-1): final_pairs[current_path[j]] = current_path[j+1]
-                
-                # Check Blocked Rule when connecting paths
-                edge_giver = current_path[-1]
-                edge_target = next_path[0]
-                if (edge_giver, edge_target) in blocked_edges:
-                    is_invalid_attempt = True
-                    break
-                final_pairs[edge_giver] = edge_target
+                curr_path, next_path = g[i], g[(i+1)%len(g)]
+                for j in range(len(curr_path)-1): final_pairs[curr_path[j]] = curr_path[j+1]
+                if (curr_path[-1], next_path[0]) in blocked_edges: is_invalid = True; break
+                final_pairs[curr_path[-1]] = next_path[0]
+            if is_invalid: break
+        if not is_invalid: valid_final_pairs = final_pairs; break
             
-            if is_invalid_attempt: break
-        
-        if not is_invalid_attempt:
-            valid_final_pairs = final_pairs
-            break # พบรูปแบบที่สมบูรณ์และไม่แหกกฎ
-            
-    if not valid_final_pairs:
-        st.error("ระบบหาการจับคู่ที่ตรงตามเงื่อนไขไม่พบ! (เงื่อนไข ล็อก/ห้าม ขัดแย้งกันเกินไป) กรุณาลดกฎลง")
-        return
+    if not valid_final_pairs: return st.error("หาการจับคู่ไม่พบ! เงื่อนไขขัดแย้งกันเกินไป กรุณาลดกฎลง")
 
-    # 5. Security Save
-    final_pairs = valid_final_pairs
-    if len(final_pairs) != len(names) or any(k == v for k, v in final_pairs.items()) or any(final_pairs.get(v) == k for k, v in final_pairs.items()):
-        st.error("ระบบตรวจสอบพบการชนกัน จึงยกเลิกการบันทึก")
-        return
+    if len(valid_final_pairs) != len(names) or any(k == v for k, v in valid_final_pairs.items()) or any(valid_final_pairs.get(v) == k for k, v in valid_final_pairs.items()):
+        return st.error("ตรวจพบการชนกัน จึงยกเลิกการบันทึก")
 
     result_to_save = df_master[["Name", "Dept", "Year"]].copy()
-    result_to_save["Monito"] = result_to_save["Name"].map(final_pairs)
+    result_to_save["Monito"] = result_to_save["Name"].map(valid_final_pairs)
     
     try:
         conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=result_to_save[RESULT_COLUMNS])
         st.cache_data.clear()
-        st.success("สุ่มและบันทึกผลสำเร็จ! (ทำตามกฎ ล็อก/ห้าม สมบูรณ์ 100%)")
+        write_log(f"Draw generated successfully ({num_circles} circles).")
+        st.success("สุ่มและบันทึกผลสำเร็จ!")
         time.sleep(1.5)
         st.rerun()
     except Exception: st.error("บันทึกผลไม่สำเร็จ")
+    finally:
+        set_drawing_lock(False)
 
 # ---------------------------------------------------------
 # App Main Flow
@@ -401,18 +418,20 @@ if result_exists:
 
         if selected_name:
             attempts_key = "dob_attempts_" + hashlib.sha256(selected_name.encode("utf-8")).hexdigest()[:16]
-            if int(st.session_state.get(attempts_key, 0)) >= MAX_DOB_ATTEMPTS_PER_SESSION: st.error("กรอกรหัสผิดเกินกำหนด")
+            if int(st.session_state.get(attempts_key, 0)) >= MAX_DOB_ATTEMPTS_PER_SESSION: 
+                st.error("กรอกรหัสผิดเกินกำหนด")
+                write_log(f"Locked out: {selected_name} exceeded max DOB attempts.")
             else:
                 with st.form("participant_result_form"):
                     entered_dob = st.text_input("🔑 2. รหัสผ่าน (DDMMYYYY)", type="password")
                     if st.form_submit_button("👀 ดูผลจับฉลาก"):
                         if normalize_dob(entered_dob) and hmac.compare_digest(normalize_dob(entered_dob), dob_lookup.get(selected_name, "")):
-                            st.session_state.update({"verified_participant_name": selected_name, "verified_participant_until": time.time() + 300, attempts_key: 0})
+                            st.session_state.update({"verified_participant_name": selected_name, "verified_participant_until": get_bkk_time().timestamp() + 300, attempts_key: 0})
                         else:
                             st.session_state[attempts_key] = int(st.session_state.get(attempts_key, 0)) + 1
                             st.error("รหัสไม่ถูกต้อง")
 
-            if st.session_state.get("verified_participant_name") == selected_name and time.time() <= float(st.session_state.get("verified_participant_until", 0)):
+            if st.session_state.get("verified_participant_name") == selected_name and get_bkk_time().timestamp() <= float(st.session_state.get("verified_participant_until", 0)):
                 st.success("🎉 Monito ของคุณคือ:")
                 monito_name = result_lookup[selected_name]["Monito"]
                 st.subheader(name_to_label.get(monito_name, monito_name))
@@ -433,11 +452,23 @@ if result_exists:
             except Exception: pass
 
         if st.button("⚠️ ล้างผลจับฉลาก"):
-            try:
-                conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=pd.DataFrame([{col: "" for col in RESULT_COLUMNS}]))
-                st.cache_data.clear(); st.session_state.pop("verified_participant_name", None)
-                st.success("ล้างผลสำเร็จ"); time.sleep(1); st.rerun()
-            except Exception: st.error("ล้างผลไม่สำเร็จ")
+            if is_drawing_in_progress():
+                st.error("❌ มีสตาฟท่านอื่นกำลังประมวลผลอยู่ กรุณารอสักครู่")
+            else:
+                try:
+                    set_drawing_lock(True)
+                    # 1. Backup old results
+                    backup_sheet_name = f"Backup_{get_bkk_time().strftime('%d%b_%H%M')}"
+                    try: conn.update(spreadsheet=SPREADSHEET_URL, worksheet=backup_sheet_name, data=df_result_raw)
+                    except Exception as e: print(f"Backup failed: {e}")
+                    
+                    # 2. Clear current results
+                    conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=pd.DataFrame([{col: "" for col in RESULT_COLUMNS}]))
+                    st.cache_data.clear(); st.session_state.pop("verified_participant_name", None)
+                    write_log(f"Results cleared. Backup saved as {backup_sheet_name}")
+                    st.success(f"ล้างผลสำเร็จ (สำรองข้อมูลไว้ที่แท็บ {backup_sheet_name})"); time.sleep(1.5); st.rerun()
+                except Exception: st.error("ล้างผลไม่สำเร็จ")
+                finally: set_drawing_lock(False)
 
 else:
     st.info("โหมดเตรียมการสำหรับสตาฟ")
@@ -491,5 +522,12 @@ else:
             num_circles = st.slider("🔄 ต้องการแบ่งเป็นกี่วง?", 1, max(1, len(df_master) // 3), 1)
             
             if st.button("🎲 เริ่มสุ่มจับคู่และล็อกผล", use_container_width=True):
-                with st.spinner("กำลังประมวลผล (หาลูปที่ตรงตามกฎ)..."):
-                    run_draw(num_circles, st.session_state.locked_pairs, st.session_state.blocked_pairs)
+                if is_drawing_in_progress():
+                    st.error("❌ มีสตาฟท่านอื่นกำลังประมวลผลอยู่ กรุณารอสักครู่")
+                else:
+                    try:
+                        set_drawing_lock(True)
+                        with st.spinner("กำลังประมวลผล..."):
+                            run_draw(num_circles, st.session_state.locked_pairs, st.session_state.blocked_pairs)
+                    finally:
+                        set_drawing_lock(False)
