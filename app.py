@@ -14,9 +14,10 @@ from streamlit_gsheets import GSheetsConnection
 # =========================================================
 # Monito AnurakSciCU (Ultimate Version)
 # - เพิ่ม Concurrency Control (กันกดสุ่มพร้อมกัน)
-# - เพิ่ม Auto-Backup เมื่อกดล้างผล
+# - เพิ่ม Auto-Backup เมื่อกดล้างผล (Fix สร้างแท็บใหม่)
 # - เพิ่ม Audit Logs ในแท็บตั้งค่า
 # - เวลาในระบบตรงกับเวลาประเทศไทย (UTC+7)
+# - ค้นหาด้วย Dropdown และล้างผลด้วยรหัสผ่าน Admin
 # =========================================================
 
 st.set_page_config(page_title="Monito AnurakSciCU", page_icon="🎁", layout="centered")
@@ -95,11 +96,10 @@ except Exception:
 # Audit Logs System
 # ---------------------------------------------------------
 def write_log(message: str):
-    """Write an audit log to the config sheet (keeps last 15 logs)"""
     try:
         current_config = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=0)
         logs = [r for _, r in current_config.iterrows() if str(r.get("Key", "")).startswith("log_")]
-        logs = sorted(logs, key=lambda x: x["Key"], reverse=True)[:14] # Keep last 14 logs to make room for new one
+        logs = sorted(logs, key=lambda x: x["Key"], reverse=True)[:14]
         
         timestamp_str = get_bkk_time().strftime("%Y%m%d_%H%M%S")
         new_log = {"Key": f"log_{timestamp_str}", "Value": f"[{get_bkk_time().strftime('%d/%m/%Y %H:%M:%S')}] {message}"}
@@ -119,7 +119,6 @@ def is_drawing_in_progress() -> bool:
     lock_time_str = values.get("system_drawing_lock", "0")
     try:
         lock_time = float(lock_time_str)
-        # Lock expires after 2 minutes just in case process crashes
         if get_bkk_time().timestamp() - lock_time < 120:
             return True
     except: pass
@@ -441,93 +440,40 @@ if result_exists:
         st.divider(); st.subheader("🛠️ เครื่องมือ Admin")
         if result_is_valid:
             with st.expander("🔎 ค้นหาผลให้ผู้ที่ลืม Monito"):
-                search_name = st.text_input("พิมพ์ชื่อผู้เข้าร่วม")
-                if search_name.strip():
-                    found = df_result[df_result["Name"].str.casefold().str.contains(search_name.strip().casefold(), regex=False)].copy()
-                    if found.empty: st.info("ไม่พบ")
-                    else:
+                admin_search_name = st.selectbox(
+                    "เลือกชื่อผู้เข้าร่วมที่ต้องการค้นหา", 
+                    options=[""] + df_result["Name"].tolist(), 
+                    format_func=lambda value: "-- เลือกชื่อ --" if value == "" else name_to_label[value],
+                    key="admin_search_dropdown"
+                )
+                if admin_search_name:
+                    found = df_result[df_result["Name"] == admin_search_name].copy()
+                    if not found.empty:
                         found["Monito"] = found["Monito"].map(name_to_label).fillna(found["Monito"])
                         st.dataframe(found, use_container_width=True, hide_index=True)
+            
             try: st.download_button("⬇️ ดาวน์โหลด Excel สำรอง", data=create_offline_excel(df_result), file_name="Monito_Offline.xlsx")
             except Exception: pass
 
-        if st.button("⚠️ ล้างผลจับฉลาก"):
-            if is_drawing_in_progress():
-                st.error("❌ มีสตาฟท่านอื่นกำลังประมวลผลอยู่ กรุณารอสักครู่")
-            else:
-                try:
-                    set_drawing_lock(True)
-                    # 1. Backup old results
-                    backup_sheet_name = f"Backup_{get_bkk_time().strftime('%d%b_%H%M')}"
-                    try: conn.update(spreadsheet=SPREADSHEET_URL, worksheet=backup_sheet_name, data=df_result_raw)
-                    except Exception as e: print(f"Backup failed: {e}")
-                    
-                    # 2. Clear current results
-                    conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=pd.DataFrame([{col: "" for col in RESULT_COLUMNS}]))
-                    st.cache_data.clear(); st.session_state.pop("verified_participant_name", None)
-                    write_log(f"Results cleared. Backup saved as {backup_sheet_name}")
-                    st.success(f"ล้างผลสำเร็จ (สำรองข้อมูลไว้ที่แท็บ {backup_sheet_name})"); time.sleep(1.5); st.rerun()
-                except Exception: st.error("ล้างผลไม่สำเร็จ")
-                finally: set_drawing_lock(False)
-
-else:
-    st.info("โหมดเตรียมการสำหรับสตาฟ")
-    if master_error: st.error(master_error)
-    elif df_master.empty: st.error("ไม่พบรายชื่อในแท็บ 'รายชื่อ'")
-    else:
-        st.write(f"พบรายชื่อผู้เข้าร่วม {len(df_master)} คน")
-        if not admin_is_authenticated(): st.warning("ต้องเข้าสู่ระบบ Admin ก่อน จึงจะจัดวงและสุ่มได้")
-        elif len(df_master) < 3: st.error("ต้องมีอย่างน้อย 3 คน")
-        else:
-            participant_names = df_master["Name"].tolist()
-            if "locked_pairs" not in st.session_state: st.session_state.locked_pairs = []
-            if "blocked_pairs" not in st.session_state: st.session_state.blocked_pairs = []
-
-            st.markdown("### 🔒 ล็อกคู่ (ต้องได้)")
-            if st.session_state.locked_pairs:
-                for i, lock in enumerate(st.session_state.locked_pairs):
-                    c1, c2, c3 = st.columns([4, 4, 2])
-                    c1.markdown(f"**{lock['giver']}** ➡️ จับได้")
-                    c2.markdown(f"**{lock['target']}**")
-                    if c3.button("ลบ", key=f"del_lock_{i}"): st.session_state.locked_pairs.pop(i); st.rerun()
-            with st.expander("➕ เพิ่มล็อกคู่"):
-                col1, col2 = st.columns(2)
-                avail_g = [n for n in participant_names if n not in [l['giver'] for l in st.session_state.locked_pairs]]
-                avail_t = [n for n in participant_names if n not in [l['target'] for l in st.session_state.locked_pairs]]
-                with col1: giver = st.selectbox("ผู้จับ", [""] + avail_g, key="lock_g")
-                with col2: target = st.selectbox("จับได้ใคร", [""] + avail_t, key="lock_t")
-                if st.button("บันทึกล็อกคู่", use_container_width=True):
-                    if not giver or not target: st.error("เลือกให้ครบ")
-                    elif giver == target: st.error("ห้ามจับตัวเอง")
-                    else: st.session_state.locked_pairs.append({"giver": giver, "target": target}); st.rerun()
-
-            st.markdown("### 🚫 ห้ามคู่ (ห้ามได้)")
-            if st.session_state.blocked_pairs:
-                for i, block in enumerate(st.session_state.blocked_pairs):
-                    c1, c2, c3 = st.columns([4, 4, 2])
-                    c1.markdown(f"**{block['giver']}** ❌ ห้ามได้")
-                    c2.markdown(f"**{block['target']}**")
-                    if c3.button("ลบ", key=f"del_block_{i}"): st.session_state.blocked_pairs.pop(i); st.rerun()
-            with st.expander("➖ เพิ่มห้ามคู่"):
-                col1, col2 = st.columns(2)
-                with col1: b_giver = st.selectbox("ผู้จับ", [""] + participant_names, key="block_g")
-                with col2: b_target = st.selectbox("ห้ามจับได้ใคร", [""] + participant_names, key="block_t")
-                if st.button("บันทึกห้ามคู่", use_container_width=True):
-                    if not b_giver or not b_target: st.error("เลือกให้ครบ")
-                    elif b_giver == b_target: st.error("ระบบห้ามจับตัวเองอยู่แล้ว")
-                    elif any(b["giver"]==b_giver and b["target"]==b_target for b in st.session_state.blocked_pairs): st.error("มีกฎนี้อยู่แล้ว")
-                    else: st.session_state.blocked_pairs.append({"giver": b_giver, "target": b_target}); st.rerun()
-
-            st.markdown("---")
-            num_circles = st.slider("🔄 ต้องการแบ่งเป็นกี่วง?", 1, max(1, len(df_master) // 3), 1)
-            
-            if st.button("🎲 เริ่มสุ่มจับคู่และล็อกผล", use_container_width=True):
-                if is_drawing_in_progress():
+        with st.expander("⚠️ ล้างผลจับฉลาก (เริ่มค่ายใหม่)"):
+            st.warning("การล้างผล ระบบจะดึงผลปัจจุบันไปเก็บไว้ในแท็บ Backup อัตโนมัติ ป้องกันข้อมูลสูญหาย")
+            reset_pwd = st.text_input("กรอกรหัสผ่าน Admin เพื่อยืนยัน", type="password", key="reset_confirm_pwd")
+            if st.button("🗑️ ยืนยันการล้างผล", type="primary", use_container_width=True):
+                credentials = stored_admin_credentials(df_config)
+                if not verify_admin_password(reset_pwd, credentials):
+                    st.error("รหัสผ่านไม่ถูกต้อง ล้างผลไม่สำเร็จ")
+                elif is_drawing_in_progress():
                     st.error("❌ มีสตาฟท่านอื่นกำลังประมวลผลอยู่ กรุณารอสักครู่")
                 else:
                     try:
                         set_drawing_lock(True)
-                        with st.spinner("กำลังประมวลผล..."):
-                            run_draw(num_circles, st.session_state.locked_pairs, st.session_state.blocked_pairs)
-                    finally:
-                        set_drawing_lock(False)
+                        backup_sheet_name = f"Backup_{get_bkk_time().strftime('%d%b_%H%M')}"
+                        
+                        # --- แก้ไขการสร้างแท็บ Backup ให้เสถียร 100% ---
+                        try:
+                            # ดึง gspread client ออกมาใช้สร้างแท็บใหม่ตรงๆ
+                            sh = conn.client.open_by_url(SPREADSHEET_URL)
+                            try:
+                                sh.worksheet(backup_sheet_name) # ลองดูว่ามีแท็บนี้หรือยัง
+                            except:
+                                sh.add_worksheet(title=backup_sheet_name
