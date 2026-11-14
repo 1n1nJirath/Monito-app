@@ -13,9 +13,8 @@ from streamlit_gsheets import GSheetsConnection
 
 # =========================================================
 # Monito System - General Use + Ultimate Features
-# - ซ่อนผลจับคู่ใน Google Sheets (ตัวอักษรกลืนกับพื้นหลัง)
-# - ระบบติดตามการเข้าดูผล (ใครดูแล้ว/ใครยังไม่ดู)
-# - แก้บั๊ก NameError: display_label เรียบร้อยแล้ว
+# - ย้าย Read Receipt (เวลาเปิดดู) ไปไว้ในแท็บผลจับฉลาก
+# - เพิ่มการแสดงผล (ชั้นปีและภาควิชา) ในทุกส่วนของระบบ
 # =========================================================
 
 st.set_page_config(page_title="Monito System", page_icon="🎁", layout="centered")
@@ -39,7 +38,7 @@ def get_bkk_time(): return datetime.now(BKK_TZ)
 
 MASTER_SHEET, RESULT_SHEET, CONFIG_SHEET = "รายชื่อ", "ผลจับฉลาก", "ตั้งค่า"
 REQUIRED_MASTER_COLUMNS = ["Name", "Dept", "Year", "DOB"]
-RESULT_COLUMNS = ["Name", "Dept", "Year", "Monito"]
+RESULT_COLUMNS = ["Name", "Dept", "Year", "Monito", "Viewed_At"] # เพิ่มคอลัมน์เก็บเวลาดูผล
 PBKDF2_ITERATIONS, ADMIN_SESSION_SECONDS, MAX_DOB_ATTEMPTS = 600_000, 1800, 5
 
 try:
@@ -52,13 +51,23 @@ except Exception:
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
     df_raw = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=MASTER_SHEET, ttl=30)
+    
     try: df_result_raw = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, ttl=30)
     except: df_result_raw = pd.DataFrame()
+    
+    # ตรวจสอบและปรับปรุงโครงสร้างชีทผลการจับฉลาก (เผื่อตารางเก่ายังไม่มีคอลัมน์ Viewed_At)
     if df_result_raw.empty and not set(RESULT_COLUMNS).issubset(df_result_raw.columns):
         conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=pd.DataFrame([{col: "" for col in RESULT_COLUMNS}]))
         st.cache_data.clear(); df_result_raw = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, ttl=30)
+    elif not df_result_raw.empty and not set(RESULT_COLUMNS).issubset(df_result_raw.columns):
+        for col in RESULT_COLUMNS:
+            if col not in df_result_raw.columns: df_result_raw[col] = ""
+        conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=df_result_raw)
+        st.cache_data.clear(); df_result_raw = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, ttl=30)
+
     try: df_config = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=30)
     except: df_config = pd.DataFrame()
+    
     if df_config.empty and not {"Key", "Value"}.issubset(df_config.columns):
         conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=pd.DataFrame([{"Key": "", "Value": ""}]))
         st.cache_data.clear(); df_config = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=30)
@@ -89,18 +98,19 @@ def write_log(msg):
     except: pass
 
 def mark_as_viewed(name):
-    """บันทึกสถานะว่าผู้เล่นเข้ามาดูผลแล้ว"""
+    """บันทึกเวลาที่เปิดดูลงในคอลัมน์ Viewed_At แท็บผลจับฉลากโดยตรง"""
     try:
-        curr = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=0)
-        key = f"viewed_{name}"
-        if key not in curr["Key"].values:
-            new_row = {"Key": key, "Value": get_bkk_time().strftime('%d/%m/%Y %H:%M:%S')}
-            updated = pd.concat([curr, pd.DataFrame([new_row])], ignore_index=True)
-            conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=updated)
-            st.cache_data.clear()
+        curr_res = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, ttl=0)
+        if "Viewed_At" not in curr_res.columns: curr_res["Viewed_At"] = ""
+        idx = curr_res.index[curr_res["Name"] == name].tolist()
+        if idx:
+            current_viewed = curr_res.at[idx[0], "Viewed_At"]
+            if pd.isna(current_viewed) or str(current_viewed).strip() == "":
+                curr_res.at[idx[0], "Viewed_At"] = get_bkk_time().strftime('%d/%m/%Y %H:%M:%S')
+                conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=curr_res)
+                st.cache_data.clear()
     except Exception as e: print(f"Mark viewed error: {e}")
 
-# ย้ายฟังก์ชัน display_label มาไว้ด้านบนแล้ว (แก้ NameError)
 def display_label(row): 
     return f"{row['Name']} ({row['Dept']} #{row['Year']})"
 
@@ -124,6 +134,7 @@ if not df_result_raw.empty and set(RESULT_COLUMNS).issubset(df_result_raw.column
     df_result = df_result.loc[~df_result.eq("").all(axis=1)].copy().reset_index(drop=True)
 
 result_exists = not df_result.empty
+# ดิกชันนารีแปลชื่อปกติ ให้เป็นชื่อ+คณะ+ชั้นปี
 name_to_label = {row["Name"]: f"{row['Name']} ({row['Dept']} #{row['Year']})" for _, row in df_master.iterrows()}
 
 # =========================================================
@@ -155,7 +166,7 @@ with tab_player:
                     if st.form_submit_button("👀 ดูผลจับฉลาก"):
                         if normalize_dob(pwd) and hmac.compare_digest(normalize_dob(pwd), dob_lookup.get(selected_name, "")):
                             st.session_state.update({"verified_user": selected_name, "verified_until": get_bkk_time().timestamp() + 300, attempts_key: 0})
-                            mark_as_viewed(selected_name) # บันทึกว่าคนนี้เข้าดูผลแล้ว
+                            mark_as_viewed(selected_name)
                             st.balloons()
                         else:
                             st.session_state[attempts_key] = int(st.session_state.get(attempts_key, 0)) + 1
@@ -190,7 +201,6 @@ with tab_admin:
         st.success("✅ เข้าสู่ระบบ Admin แล้ว")
         if st.button("ออกจากระบบ"): st.session_state.pop("is_admin", None); st.rerun()
         
-        # --- Metrics Dashboard ---
         c1, c2, c3 = st.columns(3)
         c1.metric("👥 ผู้เข้าร่วม", len(df_master))
         c2.metric("🔒 สถานะการสุ่ม", "เสร็จสิ้น" if result_exists else "รอการสุ่ม")
@@ -211,15 +221,16 @@ with tab_admin:
                 if st.session_state.locked_pairs:
                     for i, lock in enumerate(st.session_state.locked_pairs):
                         c1, c2, c3 = st.columns([4, 4, 2])
-                        c1.write(f"**{lock['giver']}** ➡️")
-                        c2.write(f"**{lock['target']}**")
+                        c1.write(f"**{name_to_label.get(lock['giver'], lock['giver'])}** ➡️") # อัปเดตให้แสดงชื่อและชั้นปี
+                        c2.write(f"**{name_to_label.get(lock['target'], lock['target'])}**")
                         if c3.button("ลบ", key=f"del_lock_{i}"): st.session_state.locked_pairs.pop(i); st.rerun()
                 with st.expander("➕ เพิ่มล็อกคู่"):
                     col1, col2 = st.columns(2)
                     avail_g = [n for n in df_master["Name"] if n not in [l['giver'] for l in st.session_state.locked_pairs]]
                     avail_t = [n for n in df_master["Name"] if n not in [l['target'] for l in st.session_state.locked_pairs]]
-                    with col1: giver = st.selectbox("ผู้จับ", [""] + avail_g, key="lock_g")
-                    with col2: target = st.selectbox("จับได้ใคร", [""] + avail_t, key="lock_t")
+                    # Dropdown แสดงชื่อ+คณะ+ปี
+                    with col1: giver = st.selectbox("ผู้จับ", [""] + avail_g, format_func=lambda x: name_to_label.get(x, x) if x else "-- เลือกผู้จับ --", key="lock_g")
+                    with col2: target = st.selectbox("จับได้ใคร", [""] + avail_t, format_func=lambda x: name_to_label.get(x, x) if x else "-- เลือกเป้าหมาย --", key="lock_t")
                     if st.button("บันทึกล็อกคู่", use_container_width=True):
                         if not giver or not target: st.error("เลือกให้ครบ")
                         elif giver == target: st.error("ห้ามจับตัวเอง")
@@ -229,13 +240,13 @@ with tab_admin:
                 if st.session_state.blocked_pairs:
                     for i, block in enumerate(st.session_state.blocked_pairs):
                         c1, c2, c3 = st.columns([4, 4, 2])
-                        c1.write(f"**{block['giver']}** ❌")
-                        c2.write(f"**{block['target']}**")
+                        c1.write(f"**{name_to_label.get(block['giver'], block['giver'])}** ❌")
+                        c2.write(f"**{name_to_label.get(block['target'], block['target'])}**")
                         if c3.button("ลบ", key=f"del_block_{i}"): st.session_state.blocked_pairs.pop(i); st.rerun()
                 with st.expander("➖ เพิ่มห้ามคู่"):
                     col1, col2 = st.columns(2)
-                    with col1: b_giver = st.selectbox("ผู้จับ", [""] + df_master["Name"].tolist(), key="block_g")
-                    with col2: b_target = st.selectbox("ห้ามจับได้ใคร", [""] + df_master["Name"].tolist(), key="block_t")
+                    with col1: b_giver = st.selectbox("ผู้จับ", [""] + df_master["Name"].tolist(), format_func=lambda x: name_to_label.get(x, x) if x else "-- เลือกผู้จับ --", key="block_g")
+                    with col2: b_target = st.selectbox("ห้ามจับได้ใคร", [""] + df_master["Name"].tolist(), format_func=lambda x: name_to_label.get(x, x) if x else "-- เลือกเป้าหมาย --", key="block_t")
                     if st.button("บันทึกห้ามคู่", use_container_width=True):
                         if not b_giver or not b_target: st.error("เลือกให้ครบ")
                         elif b_giver == b_target: st.error("ระบบห้ามจับตัวเองอยู่แล้ว")
@@ -246,7 +257,6 @@ with tab_admin:
                 
                 if st.button("🎲 เริ่มสุ่มจับคู่", type="primary", use_container_width=True):
                     with st.spinner("กำลังคำนวณและเขียนลง Sheets..."):
-                        # --- ลอจิกสุ่มผล ---
                         names = df_master["Name"].tolist()
                         locked_dict = {p["giver"]: p["target"] for p in st.session_state.locked_pairs}
                         blocked_set = set((p["giver"], p["target"]) for p in st.session_state.blocked_pairs)
@@ -298,6 +308,7 @@ with tab_admin:
                         else:
                             result_to_save = df_master[["Name", "Dept", "Year"]].copy()
                             result_to_save["Monito"] = result_to_save["Name"].map(valid_pairs)
+                            result_to_save["Viewed_At"] = "" # ตั้งค่าเริ่มต้นเวลาเข้าดูให้ว่างเปล่า
                             
                             try:
                                 conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=result_to_save[RESULT_COLUMNS])
@@ -306,7 +317,7 @@ with tab_admin:
                                 try:
                                     sh = conn.client.open_by_url(SPREADSHEET_URL)
                                     ws = sh.worksheet(RESULT_SHEET)
-                                    ws.format("D2:D2000", { 
+                                    ws.format("D2:D2000", { # Format คอลัมน์ Monito (D)
                                         "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
                                         "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
                                     })
@@ -320,29 +331,31 @@ with tab_admin:
         # ----- ค้นหาและดูสถานะ -----
         with sub_tab2:
             st.markdown("### 👁️ สถานะการเปิดดูผล (Read Receipt)")
-            view_keys = [k.replace("viewed_", "") for k in cfg.keys() if str(k).startswith("viewed_")]
-            all_names = df_result["Name"].tolist() if result_exists else []
-            
             if result_exists:
-                not_viewed = [n for n in all_names if n not in view_keys]
-                viewed = [n for n in all_names if n in view_keys]
+                # ตรวจสอบคอลัมน์ Viewed_At ว่าใครเข้าดูแล้วบ้าง
+                viewed_mask = (df_result["Viewed_At"].notna()) & (df_result["Viewed_At"] != "")
+                viewed = df_result[viewed_mask]["Name"].tolist()
+                not_viewed = df_result[~viewed_mask]["Name"].tolist()
                 
                 vc1, vc2 = st.columns(2)
                 vc1.metric("✅ เปิดดูแล้ว", f"{len(viewed)} คน")
                 vc2.metric("❌ ยังไม่เปิดดู", f"{len(not_viewed)} คน")
                 
                 with st.expander("รายชื่อคนที่ยังไม่เปิดดู", expanded=True):
-                    if not_viewed: st.error(", ".join(not_viewed))
-                    else: st.success("ทุกคนเข้ามาดูผลครบแล้ว!")
+                    if not_viewed: 
+                        not_viewed_labels = [name_to_label.get(n, n) for n in not_viewed]
+                        st.error(", ".join(not_viewed_labels)) # แปลงชื่อเป็นรูปแบบมีชั้นปีและคณะ
+                    else: 
+                        st.success("ทุกคนเข้ามาดูผลครบแล้ว!")
             else:
                 st.info("ยังไม่มีการสุ่มผล")
             
             st.divider()
             st.markdown("### 🔎 ค้นหาผล (กรณีเด็กลืมบัดดี้)")
-            admin_search = st.selectbox("ค้นหาชื่อผู้จับ", options=[""] + all_names, format_func=lambda v: "-- เลือกชื่อ --" if v == "" else name_to_label.get(v, v))
+            admin_search = st.selectbox("ค้นหาชื่อผู้จับ", options=[""] + (df_result["Name"].tolist() if result_exists else []), format_func=lambda v: "-- เลือกชื่อ --" if v == "" else name_to_label.get(v, v))
             if admin_search and result_exists:
                 target = df_result.set_index("Name").to_dict(orient="index")[admin_search]["Monito"]
-                st.success(f"{admin_search} จับได้ ➡️ {name_to_label.get(target, target)}")
+                st.success(f"{name_to_label.get(admin_search, admin_search)} จับได้ ➡️ {name_to_label.get(target, target)}")
                 
         # ----- ตั้งค่าระบบ -----
         with sub_tab3:
@@ -350,7 +363,6 @@ with tab_admin:
             st.caption("สามารถเปลี่ยนชื่อค่ายได้โดยพิมพ์ `event_name` ในแท็บ 'ตั้งค่า' ของ Google Sheets")
             
             if result_exists:
-                # ระบบ Generate ไฟล์ Excel ออฟไลน์
                 buffer = io.BytesIO()
                 person_labels = {row["Name"]: display_label(row) for _, row in df_master.iterrows()}
                 export_df = df_result.copy()
@@ -364,13 +376,12 @@ with tab_admin:
 
             st.divider()
             st.markdown("### ⚠️ ล้างผลจับฉลาก (โซนอันตราย)")
-            st.warning("การล้างผล ระบบจะดึงผลปัจจุบันไปเก็บไว้ในแท็บ Backup อัตโนมัติ ป้องกันข้อมูลสูญหาย")
+            st.warning("การล้างผล ระบบจะเก็บผลปัจจุบันไปไว้ในแท็บ Backup อัตโนมัติ (และสถานะการเข้าดูจะถูกลบไปด้วย)")
             reset_pwd = st.text_input("กรอกรหัสผ่าน Admin เพื่อยืนยัน", type="password", key="reset_confirm_pwd")
             if st.button("🗑️ ยืนยันการล้างผล", type="primary"):
                 if not verify_admin(reset_pwd): st.error("รหัสผ่านไม่ถูกต้อง")
                 else:
                     try:
-                        # 1. Backup old results
                         backup_sheet_name = f"Backup_{get_bkk_time().strftime('%d%b_%H%M')}"
                         try:
                             sh = conn.client.open_by_url(SPREADSHEET_URL)
@@ -379,10 +390,9 @@ with tab_admin:
                             conn.update(spreadsheet=SPREADSHEET_URL, worksheet=backup_sheet_name, data=df_result_raw)
                         except Exception as e: print(f"Backup Error: {e}")
                         
-                        # 2. Clear results
+                        # ล้างข้อมูลและรีเซตคอลัมน์ Viewed_At ไปพร้อมกัน
                         conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=pd.DataFrame([{col: "" for col in RESULT_COLUMNS}]))
                         
-                        # 3. Clear Viewed Status & Reset Formatting
                         try:
                             sh = conn.client.open_by_url(SPREADSHEET_URL)
                             ws = sh.worksheet(RESULT_SHEET)
@@ -390,9 +400,6 @@ with tab_admin:
                                 "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}},
                                 "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
                             })
-                            curr_cfg = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=0)
-                            curr_cfg = curr_cfg[~curr_cfg["Key"].astype(str).str.startswith("viewed_")]
-                            conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=curr_cfg)
                         except: pass
 
                         st.cache_data.clear(); st.session_state.pop("verified_user", None)
