@@ -10,7 +10,7 @@ mock_st.secrets = {
     "ADMIN_BOOTSTRAP_PASSWORD": "mock_password"
 }
 
-# 💡 เพิ่มบรรทัดนี้: สอน Mock ให้ st.columns และ st.tabs คืนค่ากลับมา 3 ชิ้น และ 2 ชิ้นตามที่โค้ดต้องการ
+# 💡 ต้องมี 2 บรรทัดนี้! เพื่อหลอก Streamlit ว่ามันคืนค่า Tabs และ Columns กลับมาให้จริงๆ
 mock_st.columns.return_value = [MagicMock(), MagicMock(), MagicMock()]
 mock_st.tabs.return_value = [MagicMock(), MagicMock()]
 
