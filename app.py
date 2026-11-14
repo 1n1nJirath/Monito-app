@@ -102,18 +102,36 @@ def write_log(msg):
     except: pass
 
 def mark_as_viewed(name):
-    """บันทึกเวลาที่เปิดดูลงในคอลัมน์ Viewed_At แท็บผลจับฉลากโดยตรง"""
+    """บันทึกเวลาที่เปิดดูลงในคอลัมน์ Viewed_At แท็บผลจับฉลากแบบเจาะจงเซลล์"""
     try:
-        curr_res = conn.read(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, ttl=0)
-        if "Viewed_At" not in curr_res.columns: curr_res["Viewed_At"] = ""
-        idx = curr_res.index[curr_res["Name"] == name].tolist()
-        if idx:
-            current_viewed = curr_res.at[idx[0], "Viewed_At"]
-            if pd.isna(current_viewed) or str(current_viewed).strip() == "":
-                curr_res.at[idx[0], "Viewed_At"] = get_bkk_time().strftime('%d/%m/%Y %H:%M:%S')
-                conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=curr_res)
-                st.cache_data.clear()
-    except Exception as e: print(f"Mark viewed error: {e}")
+        # ใช้ gspread เพื่อแก้ไขเซลล์เฉพาะจุดโดยตรง (ป้องกันการเคลียร์ Format)
+        sh = _get_gspread_spreadsheet()
+        ws = sh.worksheet(RESULT_SHEET)
+        
+        # ดึงข้อมูลทั้งหมดมาเพื่อหาบรรทัด
+        records = ws.get_all_records()
+        df_temp = pd.DataFrame(records)
+        
+        if not df_temp.empty and "Name" in df_temp.columns:
+            # ตัดช่องว่างก่อนเทียบ ป้องกันปัญหาพิมพ์เคาะวรรคเกิน
+            clean_names = df_temp["Name"].astype(str).str.strip()
+            target_name = str(name).strip()
+            
+            idx = df_temp.index[clean_names == target_name].tolist()
+            if idx:
+                row_index = idx[0] + 2  # +2 เพราะ index เริ่มที่ 0 และมี Header 1 บรรทัด
+                
+                # หาเลขคอลัมน์ของ Viewed_At
+                col_index = df_temp.columns.get_loc("Viewed_At") + 1
+                
+                # ตรวจสอบว่าเคยเข้าดูหรือยัง ถ้ายังให้บันทึกเวลา
+                current_viewed = str(df_temp.at[idx[0], "Viewed_At"]).strip()
+                if current_viewed == "" or current_viewed.lower() in ["nan", "none"]:
+                    now_str = get_bkk_time().strftime('%d/%m/%Y %H:%M:%S')
+                    ws.update_cell(row_index, col_index, now_str)
+                    st.cache_data.clear() # เคลียร์แคชเพื่อให้แอดมินเห็นผลทันที
+    except Exception as e:
+        print(f"Mark viewed error: {e}")
 
 def display_label(row): 
     return f"{row['Name']} ({row['Dept']} #{row['Year']})"
