@@ -15,6 +15,7 @@ from streamlit_gsheets import GSheetsConnection
 # Monito System - General Use + Ultimate Features
 # - ซ่อนผลจับคู่ใน Google Sheets (ตัวอักษรกลืนกับพื้นหลัง)
 # - ระบบติดตามการเข้าดูผล (ใครดูแล้ว/ใครยังไม่ดู)
+# - แก้บั๊ก NameError: display_label เรียบร้อยแล้ว
 # =========================================================
 
 st.set_page_config(page_title="Monito System", page_icon="🎁", layout="centered")
@@ -98,6 +99,10 @@ def mark_as_viewed(name):
             conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=updated)
             st.cache_data.clear()
     except Exception as e: print(f"Mark viewed error: {e}")
+
+# ย้ายฟังก์ชัน display_label มาไว้ด้านบนแล้ว (แก้ NameError)
+def display_label(row): 
+    return f"{row['Name']} ({row['Dept']} #{row['Year']})"
 
 # --- Event Settings ---
 cfg = config_values(df_config)
@@ -301,7 +306,7 @@ with tab_admin:
                                 try:
                                     sh = conn.client.open_by_url(SPREADSHEET_URL)
                                     ws = sh.worksheet(RESULT_SHEET)
-                                    ws.format("D2:D2000", { # Format คอลัมน์ Monito (D)
+                                    ws.format("D2:D2000", { 
                                         "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
                                         "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
                                     })
@@ -394,5 +399,3 @@ with tab_admin:
                         st.success(f"ล้างผลและสถานะการเข้าดูสำเร็จ (สร้าง Backup ไว้ที่แท็บ {backup_sheet_name})")
                         time.sleep(2); st.rerun()
                     except Exception: st.error("ล้างผลไม่สำเร็จ")
-
-def display_label(row): return f"{row['Name']} ({row['Dept']} #{row['Year']})"
