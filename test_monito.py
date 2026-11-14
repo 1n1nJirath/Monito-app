@@ -4,12 +4,16 @@ import sys
 import pandas as pd
 
 # --- 1. จำลอง (Mock) Streamlit เพื่อไม่ให้พังตอน Import ไฟล์ app.py ---
-# หลอกระบบว่ามี Streamlit Secrets อยู่แล้ว เพื่อให้ผ่านบรรทัด st.secrets ไปได้
 mock_st = MagicMock()
 mock_st.secrets = {
     "app": {"spreadsheet_url": "https://docs.google.com/spreadsheets/d/mock_url"},
     "ADMIN_BOOTSTRAP_PASSWORD": "mock_password"
 }
+
+# 💡 เพิ่มบรรทัดนี้: สอน Mock ให้ st.columns และ st.tabs คืนค่ากลับมา 3 ชิ้น และ 2 ชิ้นตามที่โค้ดต้องการ
+mock_st.columns.return_value = [MagicMock(), MagicMock(), MagicMock()]
+mock_st.tabs.return_value = [MagicMock(), MagicMock()]
+
 sys.modules["streamlit"] = mock_st
 sys.modules["streamlit_gsheets"] = MagicMock()
 
@@ -29,15 +33,14 @@ class TestMonitoDataCleaning(unittest.TestCase):
 
     def test_normalize_dob(self):
         """ทดสอบการเติมเลข 0 ข้างหน้ารหัสวันเกิดที่หายไป (ปัญหาคลาสสิกของ Excel)"""
-        self.assertEqual(app.normalize_dob("1011970"), "01011970") # เติม 0
-        self.assertEqual(app.normalize_dob("05052003"), "05052003") # ปกติ
+        self.assertEqual(app.normalize_dob("1011970"), "01011970")
+        self.assertEqual(app.normalize_dob("05052003"), "05052003")
 
 # =========================================================
 # ชุดทดสอบที่ 2: ตรวจสอบการกรองรายชื่อ (Validation)
 # =========================================================
 class TestMonitoValidation(unittest.TestCase):
     def setUp(self):
-        # สร้างข้อมูลจำลอง (Mock DataFrame) ไว้ใช้ตอนเทส
         self.master_data = pd.DataFrame({
             "Name": ["A", "B", "C"],
             "Dept": ["IT", "HR", "MKT"],
@@ -46,22 +49,20 @@ class TestMonitoValidation(unittest.TestCase):
         })
 
     def test_prepare_master_missing_column(self):
-        """ทดสอบว่าถ้ารายชื่อขาดคอลัมน์สำคัญ ระบบต้องเตะกลับด้วย ValueError"""
-        bad_data = self.master_data.drop(columns=["DOB"]) # ลบคอลัมน์ DOB ทิ้ง
+        bad_data = self.master_data.drop(columns=["DOB"])
         with self.assertRaises(ValueError):
             app.prepare_master(bad_data)
 
     def test_prepare_master_duplicate_name(self):
-        """ทดสอบว่าถ้ามีชื่อคนซ้ำกัน ระบบต้องแจ้งเตือน"""
         dup_data = pd.DataFrame({
-            "Name": ["A", "A", "C"], # ชื่อ A ซ้ำ
+            "Name": ["A", "A", "C"],
             "Dept": ["IT", "HR", "MKT"],
             "Year": ["1", "2", "3"],
             "DOB": ["01012000", "02022000", "03032000"]
         })
         with self.assertRaises(ValueError) as context:
             app.prepare_master(dup_data)
-        self.assertIn("ซ้ำกัน", str(context.exception))
+        self.assertIn("ซ้ำ", str(context.exception))
 
 # =========================================================
 # ชุดทดสอบที่ 3: ตรวจสอบกฎการจับคู่ (Algorithm Rules)
@@ -75,7 +76,6 @@ class TestMonitoAlgorithmRules(unittest.TestCase):
         })
 
     def test_validate_result_success(self):
-        """ทดสอบเคสที่ถูกต้อง: วงปิดสมบูรณ์ A->B, B->C, C->A"""
         result_data = pd.DataFrame({
             "Name": ["A", "B", "C"],
             "Dept": ["IT", "HR", "MKT"],
@@ -87,12 +87,11 @@ class TestMonitoAlgorithmRules(unittest.TestCase):
         self.assertTrue(is_valid)
 
     def test_validate_result_self_loop(self):
-        """ทดสอบการแหกกฎ: ห้ามจับได้ตัวเอง (A->A)"""
         result_data = pd.DataFrame({
             "Name": ["A", "B", "C"],
             "Dept": ["IT", "HR", "MKT"],
             "Year": ["1", "2", "3"],
-            "Monito": ["A", "C", "B"], # A ได้ A
+            "Monito": ["A", "C", "B"],
             "Viewed_At": ["", "", ""]
         })
         is_valid, msg = app.validate_result_data(result_data, self.master_data)
@@ -100,12 +99,11 @@ class TestMonitoAlgorithmRules(unittest.TestCase):
         self.assertIn("จับได้ตัวเอง", msg)
 
     def test_validate_result_mutual_pair(self):
-        """ทดสอบการแหกกฎ: ห้ามจับสลับกันเอง (B->C และ C->B)"""
         result_data = pd.DataFrame({
             "Name": ["A", "B", "C"],
             "Dept": ["IT", "HR", "MKT"],
             "Year": ["1", "2", "3"],
-            "Monito": ["B", "C", "B"], # สลับกัน
+            "Monito": ["B", "C", "B"],
             "Viewed_At": ["", "", ""]
         })
         is_valid, msg = app.validate_result_data(result_data, self.master_data)
@@ -117,18 +115,13 @@ class TestMonitoAlgorithmRules(unittest.TestCase):
 # =========================================================
 class TestMonitoSecurity(unittest.TestCase):
     def test_password_digest_and_verify(self):
-        """ทดสอบการเข้ารหัสและตรวจสอบรหัสผ่าน Admin (PBKDF2 HMAC-SHA256)"""
         password = "my_secure_password"
         salt = "random_salt_123"
-        iterations = 1000 # ใช้รอบต่ำๆ ในเทสเพื่อความรวดเร็ว
+        iterations = 1000
         
-        # 1. สร้าง Hash
         hash_val = app.password_digest(password, salt, iterations)
-        
-        # 2. จำลองข้อมูลที่ดึงมาจาก Google Sheets
         credentials = {"salt": salt, "hash": hash_val, "iterations": iterations}
         
-        # 3. เทสว่ารหัสถูก/ผิด ทำงานได้จริงไหม
         self.assertTrue(app.verify_admin_password(password, credentials))
         self.assertFalse(app.verify_admin_password("wrong_password", credentials))
 
