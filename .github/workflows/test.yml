@@ -12,7 +12,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v3
 
-    - name: Set up Python 3.10
+    - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
         python-version: "3.11"
@@ -20,7 +20,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pandas streamlit streamlit-gsheets-connection
+        pip install pandas streamlit st-gsheets-connection openpyxl
 
     - name: Run Unit Tests
       run: |
