@@ -1,14 +1,18 @@
 import hashlib
 import hmac
 import io
+import json
 import random
 import re
 import time
 from copy import copy
 from datetime import datetime, timedelta, timezone
 
+import gspread
 import pandas as pd
 import streamlit as st
+from google.oauth2.service_account import Credentials
+from gspread_formatting import CellFormat, Color, TextFormat, format_cell_range
 from streamlit_gsheets import GSheetsConnection
 
 # =========================================================
@@ -114,6 +118,36 @@ def mark_as_viewed(name):
 def display_label(row): 
     return f"{row['Name']} ({row['Dept']} #{row['Year']})"
 
+def _get_gspread_spreadsheet():
+    """เปิด Spreadsheet ด้วย gspread โดยดึง Service Account จาก st.secrets"""
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    raw = None
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        raw = st.secrets["connections"]["gsheets"]
+    elif "gcp_service_account" in st.secrets:
+        raw = st.secrets["gcp_service_account"]
+    elif "service_account" in st.secrets:
+        raw = st.secrets["service_account"]
+    info = json.loads(raw) if isinstance(raw, str) else {k: v for k, v in dict(raw).items() if k != "spreadsheet"}
+    if "private_key" in info:
+        info["private_key"] = str(info["private_key"]).replace("\\n", "\n")
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds).open_by_url(SPREADSHEET_URL)
+
+def _set_monito_camouflage(hide: bool):
+    """เปลี่ยนสีพื้นหลังและตัวอักษรคอลัมน์ Monito (D) ด้วย gspread-formatting"""
+    sh = _get_gspread_spreadsheet()
+    ws = sh.worksheet(RESULT_SHEET)
+    last_row = max(2, ws.row_count)
+    fg = Color(1, 1, 1) if hide else Color(0, 0, 0)
+    fmt = CellFormat(backgroundColor=Color(1, 1, 1), textFormat=TextFormat(foregroundColor=fg))
+    format_cell_range(ws, f"D2:D{last_row}", fmt)
+
+def clear_player_state():
+    """ล้าง key ของ widget และสถานะการดูผลใน st.session_state"""
+    for k in ("verified_user", "verified_until", "player_name_select", "player_dob_input"):
+        st.session_state.pop(k, None)
+
 # --- Event Settings ---
 cfg = config_values(df_config)
 EVENT_NAME = cfg.get("event_name", "Monito AnurakSciCU")
@@ -154,7 +188,7 @@ with tab_player:
         result_lookup = df_result.set_index("Name").to_dict(orient="index")
         dob_lookup = df_master.set_index("Name")["DOB"].to_dict()
         
-        selected_name = st.selectbox("👤 เลือกชื่อของคุณ", options=[""] + df_result["Name"].tolist(), format_func=lambda v: "-- ค้นหาชื่อของคุณ --" if v == "" else name_to_label.get(v, v))
+        selected_name = st.selectbox("👤 เลือกชื่อของคุณ", options=[""] + df_result["Name"].tolist(), format_func=lambda v: "-- ค้นหาชื่อของคุณ --" if v == "" else name_to_label.get(v, v), key="player_name_select")
         
         if selected_name:
             attempts_key = "dob_" + hashlib.sha256(selected_name.encode()).hexdigest()[:10]
@@ -162,7 +196,7 @@ with tab_player:
                 st.error("กรอกรหัสผิดเกินกำหนด")
             else:
                 with st.form("pwd_form"):
-                    pwd = st.text_input("🔑 รหัสผ่าน (วันเกิด DDMMYYYY)", type="password")
+                    pwd = st.text_input("🔑 รหัสผ่าน (วันเกิด DDMMYYYY)", type="password", key="player_dob_input")
                     if st.form_submit_button("👀 ดูผลจับฉลาก"):
                         if normalize_dob(pwd) and hmac.compare_digest(normalize_dob(pwd), dob_lookup.get(selected_name, "")):
                             st.session_state.update({"verified_user": selected_name, "verified_until": get_bkk_time().timestamp() + 300, attempts_key: 0})
@@ -181,7 +215,7 @@ with tab_player:
                         <p style="color:#e74c3c; font-size:0.9rem;">(อย่าลืมซ่อนผลก่อนส่งเครื่องให้คนอื่น)</p>
                     </div>
                 """, unsafe_allow_html=True)
-                st.button("🙈 ซ่อนผลและออกจากระบบ", on_click=lambda: st.session_state.pop("verified_user", None), use_container_width=True, type="primary")
+                st.button("🙈 ซ่อนผลและออกจากระบบ", on_click=clear_player_state, use_container_width=True, type="primary")
 
 # ----------------- TAB 2: ADMIN -----------------
 with tab_admin:
@@ -315,13 +349,9 @@ with tab_admin:
                                 
                                 # --- พรางตาสีตัวอักษรใน Google Sheets ให้เป็นสีขาว (กลืนกับพื้นหลัง) ---
                                 try:
-                                    sh = conn.client.open_by_url(SPREADSHEET_URL)
-                                    ws = sh.worksheet(RESULT_SHEET)
-                                    ws.format("D2:D2000", { # Format คอลัมน์ Monito (D)
-                                        "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
-                                        "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
-                                    })
-                                except Exception as e: print(f"Format hiding error: {e}")
+                                    _set_monito_camouflage(hide=True)
+                                except Exception as e:
+                                    print(f"Format hiding error: {e}")
 
                                 st.cache_data.clear()
                                 write_log(f"Draw generated successfully.")
@@ -379,14 +409,16 @@ with tab_admin:
             st.warning("การล้างผล ระบบจะเก็บผลปัจจุบันไปไว้ในแท็บ Backup อัตโนมัติ (และสถานะการเข้าดูจะถูกลบไปด้วย)")
             reset_pwd = st.text_input("กรอกรหัสผ่าน Admin เพื่อยืนยัน", type="password", key="reset_confirm_pwd")
             if st.button("🗑️ ยืนยันการล้างผล", type="primary"):
-                if not verify_admin(reset_pwd): st.error("รหัสผ่านไม่ถูกต้อง")
+                is_valid_admin = ("admin_hash" in cfg and verify_admin(reset_pwd)) or ("admin_hash" not in cfg and hmac.compare_digest(reset_pwd, BOOTSTRAP_ADMIN_PASSWORD))
+                if not is_valid_admin: st.error("รหัสผ่านไม่ถูกต้อง")
                 else:
                     try:
                         backup_sheet_name = f"Backup_{get_bkk_time().strftime('%d%b_%H%M')}"
                         try:
-                            sh = conn.client.open_by_url(SPREADSHEET_URL)
-                            try: sh.worksheet(backup_sheet_name)
-                            except: sh.add_worksheet(title=backup_sheet_name, rows=max(100, len(df_result_raw)+20), cols=10)
+                            sh = _get_gspread_spreadsheet()
+                            if any(w.title == backup_sheet_name for w in sh.worksheets()):
+                                backup_sheet_name = f"Backup_{get_bkk_time().strftime('%d%b_%H%M%S')}"
+                            sh.add_worksheet(title=backup_sheet_name, rows=max(100, len(df_result_raw)+20), cols=10)
                             conn.update(spreadsheet=SPREADSHEET_URL, worksheet=backup_sheet_name, data=df_result_raw)
                         except Exception as e: print(f"Backup Error: {e}")
                         
@@ -394,15 +426,10 @@ with tab_admin:
                         conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=pd.DataFrame([{col: "" for col in RESULT_COLUMNS}]))
                         
                         try:
-                            sh = conn.client.open_by_url(SPREADSHEET_URL)
-                            ws = sh.worksheet(RESULT_SHEET)
-                            ws.format("D2:D2000", { # คืนค่าสีดำให้หัวตาราง
-                                "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}},
-                                "backgroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
-                            })
-                        except: pass
+                            _set_monito_camouflage(hide=False)
+                        except Exception as e: print(f"Format restore error: {e}")
 
-                        st.cache_data.clear(); st.session_state.pop("verified_user", None)
+                        st.cache_data.clear(); clear_player_state()
                         st.success(f"ล้างผลและสถานะการเข้าดูสำเร็จ (สร้าง Backup ไว้ที่แท็บ {backup_sheet_name})")
                         time.sleep(2); st.rerun()
                     except Exception: st.error("ล้างผลไม่สำเร็จ")
