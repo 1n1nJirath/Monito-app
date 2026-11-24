@@ -4,3 +4,5 @@ st-gsheets-connection
 openpyxl
 gspread
 google-auth
+gspread-formatting
+extra-streamlit-components
