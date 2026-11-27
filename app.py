@@ -81,44 +81,62 @@ def _get_gspread_spreadsheet():
 def _get_gsheets_conn():
     return st.connection("gsheets", type=GSheetsConnection)
 
+def _with_retry(fn, retries=3, base_delay=0.6, clear_resource_fn=None):
+    """Auto-retry เมื่อเจอ 429 Rate Limit หรือ Connection หลุด พร้อม reconnect อัตโนมัติ"""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                if clear_resource_fn is not None:
+                    try: clear_resource_fn()
+                    except Exception: pass
+                time.sleep(base_delay * (2 ** attempt))
+    raise last_err
+
 @st.cache_data(ttl=300)
 def read_master_cached():
-    return _get_gsheets_conn().read(spreadsheet=SPREADSHEET_URL, worksheet=MASTER_SHEET, ttl=0)
+    return _with_retry(
+        lambda: _get_gsheets_conn().read(spreadsheet=SPREADSHEET_URL, worksheet=MASTER_SHEET, ttl=0),
+        clear_resource_fn=_get_gsheets_conn.clear,
+    )
 
 @st.cache_data(ttl=300)
 def read_config_cached():
-    return _get_gsheets_conn().read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=0)
+    return _with_retry(
+        lambda: _get_gsheets_conn().read(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, ttl=0),
+        clear_resource_fn=_get_gsheets_conn.clear,
+    )
 
 @st.cache_data(ttl=60)
 def read_result_cached():
-    return _get_gsheets_conn().read(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, ttl=0)
+    return _with_retry(
+        lambda: _get_gsheets_conn().read(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, ttl=0),
+        clear_resource_fn=_get_gsheets_conn.clear,
+    )
 
 conn = _get_gsheets_conn()
 
 try:
     df_raw = read_master_cached()
+    df_result_raw = read_result_cached()
+    df_config = read_config_cached()
 
-    try: df_result_raw = read_result_cached()
-    except: df_result_raw = pd.DataFrame()
-
-    # ตรวจสอบและปรับปรุงโครงสร้างชีทผลการจับฉลาก (รองรับ Viewed_At และ Device_Token)
-    if df_result_raw.empty and not set(RESULT_COLUMNS).issubset(df_result_raw.columns):
-        conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=pd.DataFrame([{col: "" for col in RESULT_COLUMNS}]))
-        read_result_cached.clear(); df_result_raw = read_result_cached()
-    elif not df_result_raw.empty and not set(RESULT_COLUMNS).issubset(df_result_raw.columns):
+    # เติมคอลัมน์ใหม่ในหน่วยความจำกรณีชีทเก่ายังไม่มี (ไม่เขียนทับชีทอัตโนมัติ ป้องกันข้อมูลหายจาก read error)
+    if df_result_raw is None or df_result_raw.empty:
+        df_result_raw = pd.DataFrame(columns=RESULT_COLUMNS)
+    else:
         for col in RESULT_COLUMNS:
-            if col not in df_result_raw.columns: df_result_raw[col] = ""
-        conn.update(spreadsheet=SPREADSHEET_URL, worksheet=RESULT_SHEET, data=df_result_raw[RESULT_COLUMNS])
-        read_result_cached.clear(); df_result_raw = read_result_cached()
+            if col not in df_result_raw.columns:
+                df_result_raw[col] = ""
 
-    try: df_config = read_config_cached()
-    except: df_config = pd.DataFrame()
-
-    if df_config.empty and not {"Key", "Value"}.issubset(df_config.columns):
-        conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=pd.DataFrame([{"Key": "", "Value": ""}]))
-        read_config_cached.clear(); df_config = read_config_cached()
-except Exception:
-    st.error("ไม่สามารถอ่าน Google Sheets ได้"); st.stop()
+    if df_config is None or df_config.empty or not {"Key", "Value"}.issubset(df_config.columns):
+        df_config = pd.DataFrame(columns=["Key", "Value"])
+except Exception as e:
+    st.error(f"ไม่สามารถอ่าน Google Sheets ได้ชั่วคราว กรุณารีเฟรชหน้าเว็บใหม่อีกครั้ง ({type(e).__name__})")
+    st.stop()
 
 # --- Helpers ---
 def clean_cell(value):
@@ -154,19 +172,23 @@ def write_log(msg):
     except: pass
 
 def _set_monito_camouflage(hide: bool):
-    """เปลี่ยนสีพื้นหลังและตัวอักษรคอลัมน์ Monito (D) ด้วย gspread-formatting"""
-    sh = _get_gspread_spreadsheet()
-    ws = sh.worksheet(RESULT_SHEET)
-    last_row = max(2, ws.row_count)
-    fg = Color(1, 1, 1) if hide else Color(0, 0, 0)
-    fmt = CellFormat(backgroundColor=Color(1, 1, 1), textFormat=TextFormat(foregroundColor=fg))
-    format_cell_range(ws, f"D2:D{last_row}", fmt)
+    """เปลี่ยนสีพื้นหลังและตัวอักษรคอลัมน์ Monito (D) ด้วย gspread-formatting (พร้อม Auto-Reconnect)"""
+    def _do_format():
+        sh = _get_gspread_spreadsheet()
+        ws = sh.worksheet(RESULT_SHEET)
+        last_row = max(2, ws.row_count)
+        fg = Color(1, 1, 1) if hide else Color(0, 0, 0)
+        fmt = CellFormat(backgroundColor=Color(1, 1, 1), textFormat=TextFormat(foregroundColor=fg))
+        format_cell_range(ws, f"D2:D{last_row}", fmt)
+    _with_retry(_do_format, clear_resource_fn=_get_gspread_spreadsheet.clear)
 
 def update_view_and_device_batch(sheet_row: int, viewed_at: str, device_token: str):
-    """อัปเดต Viewed_At (E) และ Device_Token (F) พร้อมกันใน 1 Request"""
-    sh = _get_gspread_spreadsheet()
-    ws = sh.worksheet(RESULT_SHEET)
-    ws.update(range_name=f"E{sheet_row}:F{sheet_row}", values=[[viewed_at, device_token]])
+    """อัปเดต Viewed_At (E) และ Device_Token (F) พร้อมกันใน 1 Request (พร้อม Auto-Reconnect)"""
+    def _do_update():
+        sh = _get_gspread_spreadsheet()
+        ws = sh.worksheet(RESULT_SHEET)
+        ws.update(range_name=f"E{sheet_row}:F{sheet_row}", values=[[viewed_at, device_token]])
+    _with_retry(_do_update, clear_resource_fn=_get_gspread_spreadsheet.clear)
     read_result_cached.clear()
 
 def clear_player_state():
@@ -222,6 +244,7 @@ with tab_player:
         st.error(f"ข้อมูลฐานชื่อมีปัญหา: {master_error}")
     else:
         st.markdown(f'<div class="status-box"><p style="color:#7f8fa6; margin:0;">ระบบเปิดให้ดูผลแล้ว ผู้เข้าร่วมทั้งหมด</p><h2 style="margin:0;">{len(df_result)} คน</h2></div>', unsafe_allow_html=True)
+        st.caption("💡 แนะนำให้เปิดลิงก์ผ่านเบราว์เซอร์หลัก (Safari หรือ Chrome) โดยตรง เนื่องจากระบบล็อกการดูผลไว้กับเบราว์เซอร์เครื่องแรกที่เปิด")
 
         result_lookup = df_result.set_index("Name").to_dict(orient="index")
         dob_lookup = df_master.set_index("Name")["DOB"].to_dict()
@@ -286,7 +309,6 @@ with tab_player:
             if st.session_state.get("verified_user") == selected_name and get_bkk_time().timestamp() <= float(st.session_state.get("verified_until", 0)):
                 target = result_lookup[selected_name]["Monito"]
                 target_profile = master_profile_lookup.get(target, {})
-                food_res = target_profile.get("Food_Restriction") or "-"
                 favs = target_profile.get("Favorites") or "-"
                 note = target_profile.get("Note_To_Monito") or "-"
 
@@ -295,7 +317,6 @@ with tab_player:
                         <p style="margin:0; font-size:1.2rem;">🎉 บัดดี้ของคุณคือ...</p>
                         <div class="big-name">{name_to_label.get(target, target)}</div>
                         <div class="profile-box">
-                            <p style="margin:4px 0;"><b>🚫 ข้อจำกัดด้านอาหาร/แพ้อาหาร:</b> {food_res}</p>
                             <p style="margin:4px 0;"><b>💛 ของที่ชอบ:</b> {favs}</p>
                             <p style="margin:4px 0;"><b>💌 สิ่งที่อยากบอกโมนิโต้:</b> {note}</p>
                         </div>
@@ -418,40 +439,54 @@ with tab_admin:
                         best_pairs = None
                         best_violations = float("inf")
 
-                        for _ in range(2000):
-                            random.SystemRandom().shuffle(paths)
-                            groups = [[] for _ in range(remaining_circles)]
-                            for idx, p in enumerate(paths): groups[idx % remaining_circles].append(p)
-
+                        if any(len(c) < 3 for c in forced_cycles):
+                            st.error("กฎล็อกคู่ทำให้เกิดวงปิดที่มีสมาชิกน้อยกว่า 3 คน (จับสลับกันเอง) กรุณาแก้ไขกฎล็อกคู่")
+                        elif remaining_circles < 0 or (remaining_circles == 0 and len(paths) > 0) or remaining_circles > len(paths):
+                            st.error("จำนวนวงที่เลือกไม่สอดคล้องกับจำนวนวงปิดที่ถูกล็อกคู่ไว้ กรุณาปรับจำนวนวงหรือลดกฎล็อกคู่")
+                        elif remaining_circles == 0 and len(paths) == 0:
                             temp_pairs = {}
                             for c in forced_cycles:
                                 for i in range(len(c)): temp_pairs[c[i]] = c[(i+1)%len(c)]
+                            if any((g_n, t_n) in blocked_set for g_n, t_n in temp_pairs.items()):
+                                st.error("กฎล็อกคู่ขัดแย้งกับกฎห้ามคู่")
+                            else:
+                                best_pairs = temp_pairs
+                                best_violations = 0
+                        else:
+                            for _ in range(2000):
+                                random.SystemRandom().shuffle(paths)
+                                groups = [[] for _ in range(remaining_circles)]
+                                for idx, p in enumerate(paths): groups[idx % remaining_circles].append(p)
 
-                            is_invalid = False
-                            for g in groups:
-                                if not g: continue
-                                if sum(len(p) for p in g) < 3: is_invalid = True; break
-                                for i in range(len(g)):
-                                    curr_path, next_path = g[i], g[(i+1)%len(g)]
-                                    for j in range(len(curr_path)-1): temp_pairs[curr_path[j]] = curr_path[j+1]
-                                    if (curr_path[-1], next_path[0]) in blocked_set: is_invalid = True; break
-                                    temp_pairs[curr_path[-1]] = next_path[0]
-                                if is_invalid: break
+                                temp_pairs = {}
+                                for c in forced_cycles:
+                                    for i in range(len(c)): temp_pairs[c[i]] = c[(i+1)%len(c)]
 
-                            if not is_invalid:
-                                violations = 0
-                                if forbid_camper_camper or forbid_staff_staff:
-                                    for g_name, t_name in temp_pairs.items():
-                                        g_role, t_role = role_map.get(g_name, ""), role_map.get(t_name, "")
-                                        if forbid_camper_camper and g_role == "camper" and t_role == "camper":
-                                            violations += 1
-                                        if forbid_staff_staff and g_role == "staff" and t_role == "staff":
-                                            violations += 1
-                                if violations < best_violations:
-                                    best_violations = violations
-                                    best_pairs = temp_pairs
-                                if best_violations == 0:
-                                    break
+                                is_invalid = False
+                                for g in groups:
+                                    if not g: continue
+                                    if sum(len(p) for p in g) < 3: is_invalid = True; break
+                                    for i in range(len(g)):
+                                        curr_path, next_path = g[i], g[(i+1)%len(g)]
+                                        for j in range(len(curr_path)-1): temp_pairs[curr_path[j]] = curr_path[j+1]
+                                        if (curr_path[-1], next_path[0]) in blocked_set: is_invalid = True; break
+                                        temp_pairs[curr_path[-1]] = next_path[0]
+                                    if is_invalid: break
+
+                                if not is_invalid:
+                                    violations = 0
+                                    if forbid_camper_camper or forbid_staff_staff:
+                                        for g_name, t_name in temp_pairs.items():
+                                            g_role, t_role = role_map.get(g_name, ""), role_map.get(t_name, "")
+                                            if forbid_camper_camper and g_role == "camper" and t_role == "camper":
+                                                violations += 1
+                                            if forbid_staff_staff and g_role == "staff" and t_role == "staff":
+                                                violations += 1
+                                    if violations < best_violations:
+                                        best_violations = violations
+                                        best_pairs = temp_pairs
+                                    if best_violations == 0:
+                                        break
 
                         if not best_pairs:
                             st.error("หาการจับคู่ไม่พบ! เงื่อนไขขัดแย้งกันเกินไป กรุณาลดกฎลง")
@@ -548,6 +583,41 @@ with tab_admin:
                     ws.freeze_panes = "A2"; ws.column_dimensions["C"].width = 24; ws.column_dimensions["F"].width = 40
 
                 st.download_button("⬇️ ดาวน์โหลด Excel สำรอง (สำหรับหน้างานออฟไลน์)", data=buffer.getvalue(), file_name=f"Monito_{EVENT_NAME}.xlsx")
+
+            with st.expander("🔑 ตั้งค่า/เปลี่ยนรหัสผ่าน Admin (บันทึกเป็น PBKDF2 Hash ลงชีท)"):
+                cur_admin_pwd = st.text_input("รหัสผ่าน Admin ปัจจุบัน", type="password", key="chg_cur_pwd")
+                new_admin_pwd = st.text_input("รหัสผ่าน Admin ใหม่ (อย่างน้อย 6 ตัวอักษร)", type="password", key="chg_new_pwd")
+                cfm_admin_pwd = st.text_input("ยืนยันรหัสผ่าน Admin ใหม่", type="password", key="chg_cfm_pwd")
+                if st.button("💾 บันทึกรหัสผ่าน Admin ใหม่", use_container_width=True):
+                    is_cur_ok = ("admin_hash" in cfg and verify_admin(cur_admin_pwd)) or ("admin_hash" not in cfg and hmac.compare_digest(cur_admin_pwd, BOOTSTRAP_ADMIN_PASSWORD))
+                    if not is_cur_ok:
+                        st.error("รหัสผ่านปัจจุบันไม่ถูกต้อง")
+                    elif len(new_admin_pwd) < 6:
+                        st.error("รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร")
+                    elif new_admin_pwd != cfm_admin_pwd:
+                        st.error("รหัสผ่านใหม่และการยืนยันไม่ตรงกัน")
+                    else:
+                        try:
+                            new_salt = uuid.uuid4().hex
+                            new_hash = hashlib.pbkdf2_hmac("sha256", new_admin_pwd.encode(), new_salt.encode(), PBKDF2_ITERATIONS).hex()
+                            read_config_cached.clear()
+                            curr_cfg_df = read_config_cached()
+                            kept_rows = [
+                                r for _, r in curr_cfg_df.iterrows()
+                                if clean_cell(r.get("Key")) not in {"admin_salt", "admin_hash", "admin_iterations"}
+                            ]
+                            kept_rows.extend([
+                                {"Key": "admin_salt", "Value": new_salt},
+                                {"Key": "admin_hash", "Value": new_hash},
+                                {"Key": "admin_iterations", "Value": str(PBKDF2_ITERATIONS)},
+                            ])
+                            conn.update(spreadsheet=SPREADSHEET_URL, worksheet=CONFIG_SHEET, data=pd.DataFrame(kept_rows))
+                            read_config_cached.clear()
+                            write_log("Admin password hash updated.")
+                            st.success("บันทึกรหัสผ่าน Admin แบบเข้ารหัส (PBKDF2 Hash) ลงชีทสำเร็จ!")
+                            time.sleep(1.5); st.rerun()
+                        except Exception as e:
+                            st.error(f"บันทึกรหัสผ่านไม่สำเร็จ: {e}")
 
             st.divider()
             st.markdown("### ⚠️ ล้างผลจับฉลาก (โซนอันตราย)")
